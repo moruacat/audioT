@@ -1,0 +1,2 @@
+// app.rc - AudioT Windows 资源定义（应用图标）
+IDI_ICON1 ICON "app-logo.ico"

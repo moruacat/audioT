@@ -1,0 +1,34 @@
+# 构建目录（全部构建变体：build、build32、build64、build_qt 等）
+build*/
+
+# 部署输出（NSIS 打包产物）
+dist/
+
+# 运行/调试产物
+audiot_selftest.wav
+devtest_err.txt
+stderr.txt
+stdout.txt
+cli_*.txt
+测试输出.*
+
+# 第三方工具安装包（Audacity 等，不入库）
+tool/
+
+# 编译中间产物（兜底）
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 系统文件
+Thumbs.db
+.DS_Store
