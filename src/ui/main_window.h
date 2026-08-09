@@ -55,13 +55,31 @@ private:
     // 展示一次解码结果（文本显示 / 文件保存对话框），供 WAV 解析使用
     void presentDecodeResult(const DecodeResult& result);
 
+    // 实时监听切段累积状态（电台与接收面板麦克风模式共用）
+    struct SegmentState {
+        std::vector<float> buffer;   // 当前累积的信号段
+        bool signalSeen = false;     // 段内是否见过信号
+        size_t quietSamples = 0;     // 段内连续静音样本数
+    };
+    // 能量门控切段状态机，回调线程每块调用；形成完整信号段时
+    // 填充 outSegment（已裁段尾静音）并重置状态
+    void accumulateSegment(SegmentState& st, const float* samples, int count,
+                           std::vector<float>& outSegment);
+
     // 电台模式：展示一段信号解码结果（文本显示 / 文件自动保存到
     // 接收文件目录），失败时给出提示
     void presentRadioResult(const DecodeResult& result);
-    // 电台模式：能量门控切段状态机，回调线程（UI）每块调用
+    // 电台模式：能量门控切段（回调线程），完整段提交后台解码
     void accumulateRadio(const float* samples, int count);
     // 电台模式：提交一段完整信号到后台线程解码
-    void submitRadioSegment();
+    void submitRadioSegment(std::vector<float>& segment);
+
+    // 接收面板麦克风模式：切段 + 后台解码 + 结果展示 + 停止
+    void accumulateRxMic(const float* samples, int count);
+    void submitRxMicSegment(std::vector<float>& segment);
+    void presentRxMicResult(const DecodeResult& result);
+    // 停止麦克风监听并回收段解码线程（幂等）
+    void stopRxMicListening();
 
     // Real-time TX playback orchestration (prep tone + modulated data)
     bool beginTxPlayback(const std::vector<float>& dataSamples);
@@ -101,12 +119,17 @@ private:
 
     // 电台模式状态（监听切段 + 后台段解码）
     bool radioListening_;                   // 麦克风监听中
-    std::vector<float> radioSegment_;       // 当前正在累积的信号段
-    bool radioSignalSeen_;                  // 当前段内是否见过信号
-    size_t radioQuietSamples_;              // 当前段内连续静音样本数
+    SegmentState radioSeg_;                 // 切段累积状态
     std::thread* radioParseThread_;         // 段解码线程（结果回 UI）
     std::atomic<bool> radioAborted_;        // 监听停止后丢弃过期解析结果
     std::atomic<int> radioParseGen_;        // 区分新旧段解码回调
+
+    // 接收面板麦克风实时模式状态（与电台监听互斥，共享输入设备）
+    bool rxMicListening_;                   // 麦克风监听中
+    SegmentState rxMicSeg_;                 // 切段累积状态
+    std::thread* rxMicParseThread_;         // 段解码线程（结果回 UI）
+    std::atomic<bool> rxMicAborted_;        // 监听停止后丢弃过期解析结果
+    std::atomic<int> rxMicParseGen_;        // 区分新旧段解码回调
 
     // RX WAV 后台解析：长音频不阻塞 UI，停止时丢弃结果
     std::thread* rxParseThread_;

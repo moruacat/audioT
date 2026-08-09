@@ -24,6 +24,16 @@ void RxPanel::setupUI()
     QGroupBox* sourceGroup = new QGroupBox(QStringLiteral("输入源"), this);
     QVBoxLayout* sourceLayout = new QVBoxLayout(sourceGroup);
 
+    // 模式选择：WAV 文件解析 / 麦克风实时监听
+    QHBoxLayout* modeLayout = new QHBoxLayout();
+    radioWav_ = new QRadioButton(QStringLiteral("WAV 文件"), this);
+    radioMic_ = new QRadioButton(QStringLiteral("麦克风（实时）"), this);
+    radioWav_->setChecked(true);
+    modeLayout->addWidget(radioWav_);
+    modeLayout->addWidget(radioMic_);
+    modeLayout->addStretch();
+    sourceLayout->addLayout(modeLayout);
+
     // WAV file row
     QHBoxLayout* wavLayout = new QHBoxLayout();
     wavFilePath_ = new QLineEdit(this);
@@ -80,6 +90,7 @@ void RxPanel::setupUI()
     connect(btnBrowse_, &QPushButton::clicked, this, &RxPanel::onBrowseWav);
     connect(btnStart_, &QPushButton::clicked, this, &RxPanel::onStartClicked);
     connect(btnStop_, &QPushButton::clicked, this, &RxPanel::onStopClicked);
+    connect(radioWav_, &QRadioButton::toggled, this, &RxPanel::onModeChanged);
     connect(btnSave, &QPushButton::clicked, this, [this]() {
         QString path = savePath_->text().trimmed();
         if (path.isEmpty()) {
@@ -107,8 +118,32 @@ void RxPanel::onBrowseWav()
     }
 }
 
+void RxPanel::onModeChanged()
+{
+    const bool wavMode = radioWav_->isChecked();
+    wavFilePath_->setVisible(wavMode);
+    btnBrowse_->setVisible(wavMode);
+    btnStart_->setText(wavMode ? QStringLiteral("开始解析")
+                               : QStringLiteral("开始监听"));
+    labelStatus_->setText(QStringLiteral("就绪"));
+    progress_->setRange(0, 100);
+    progress_->setValue(0);
+}
+
 void RxPanel::onStartClicked()
 {
+    if (radioMic_->isChecked()) {
+        // 麦克风实时模式：空路径作为模式标记，MainWindow 据此启动监听
+        emit startReceiving(QString());
+        labelStatus_->setText(QStringLiteral("监听中..."));
+        progress_->setRange(0, 0);   // 忙碌动画
+        btnStart_->setEnabled(false);
+        btnStop_->setEnabled(true);
+        radioWav_->setEnabled(false);
+        radioMic_->setEnabled(false);
+        return;
+    }
+
     const QString path = wavFilePath_->text().trimmed();
     if (path.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请选择 WAV 文件"));
@@ -121,6 +156,8 @@ void RxPanel::onStartClicked()
 
     btnStart_->setEnabled(false);
     btnStop_->setEnabled(true);
+    radioWav_->setEnabled(false);
+    radioMic_->setEnabled(false);
 }
 
 void RxPanel::clearReceived()
@@ -133,6 +170,8 @@ void RxPanel::onStopClicked()
     emit stopReceiving();
     btnStart_->setEnabled(true);
     btnStop_->setEnabled(false);
+    radioWav_->setEnabled(true);
+    radioMic_->setEnabled(true);
     labelStatus_->setText(QStringLiteral("已停止"));
 }
 
@@ -164,6 +203,8 @@ void RxPanel::onReceiveStatus(const QString& status)
         || status.contains(QStringLiteral("错误"))) {
         btnStart_->setEnabled(true);
         btnStop_->setEnabled(false);
+        radioWav_->setEnabled(true);
+        radioMic_->setEnabled(true);
     }
 }
 

@@ -48,11 +48,13 @@ MainWindow::MainWindow(QWidget* parent)
     , txDataStart_(0)
     , txDrainTicks_(0)
     , radioListening_(false)
-    , radioSignalSeen_(false)
-    , radioQuietSamples_(0)
     , radioParseThread_(nullptr)
     , radioAborted_(false)
     , radioParseGen_(0)
+    , rxMicListening_(false)
+    , rxMicParseThread_(nullptr)
+    , rxMicAborted_(false)
+    , rxMicParseGen_(0)
     , rxParseThread_(nullptr)
     , rxParseAborted_(false)
     , rxParseGen_(0)
@@ -89,6 +91,13 @@ MainWindow::~MainWindow()
     if (radioParseThread_ && radioParseThread_->joinable()) {
         radioParseThread_->join();
         delete radioParseThread_;
+    }
+    // 停止接收面板麦克风监听并回收段解码线程
+    rxMicListening_ = false;
+    rxMicAborted_ = true;
+    if (rxMicParseThread_ && rxMicParseThread_->joinable()) {
+        rxMicParseThread_->join();
+        delete rxMicParseThread_;
     }
     // 取消并等待后台 WAV 解析线程结束
     rxParseAborted_ = true;
@@ -188,11 +197,13 @@ void MainWindow::connectSignals()
     connect(radioPanel_, &RadioPanel::sendRequested,
             this, &MainWindow::onRadioSend);
 
-    // Audio input callback -> waveform display + radio mode segmenting
+    // Audio input callback -> waveform display + radio/rx-mic segmenting
     audioInput_->setCallback([this](const float* samples, int count) {
         audioMonitor_->updateWaveform(samples, count);
         if (radioListening_) {
             accumulateRadio(samples, count);
+        } else if (rxMicListening_) {
+            accumulateRxMic(samples, count);
         }
     });
 }
@@ -593,7 +604,41 @@ void MainWindow::onStopTransmission()
 void MainWindow::onStartReceiving(const QString& wavPath)
 {
     if (wavPath.isEmpty()) {
-        // 实时接收已移除：接收面板只做 WAV 文件解析
+        // 麦克风实时模式：能量门控切段 + 后台段解码（与电台复用）
+        if (radioListening_) {
+            onRadioStopListening();
+        }
+        config_ = settingsDialog_->getPipelineConfig();
+
+        // 回收上一次未结束的段解码线程（若有）
+        rxMicAborted_ = true;
+        if (rxMicParseThread_ && rxMicParseThread_->joinable()) {
+            rxMicParseThread_->join();
+            delete rxMicParseThread_;
+            rxMicParseThread_ = nullptr;
+        }
+
+        // 重置切段状态
+        rxMicListening_ = true;
+        rxMicSeg_.buffer.clear();
+        rxMicSeg_.signalSeen = false;
+        rxMicSeg_.quietSamples = 0;
+        rxMicAborted_ = false;
+        ++rxMicParseGen_;   // 使任何过期段解码回调失效
+
+        // 大缓冲（8192 样本 ≈ 186ms）监听，与电台模式一致
+        if (!audioInput_->start(config_.sampleRate, 1, 8192)) {
+            rxMicListening_ = false;
+            rxPanel_->onReceiveProgress(0);
+            rxPanel_->onReceiveStatus(QStringLiteral("错误: 无法启动麦克风监听"));
+            statusBar()->showMessage(QStringLiteral("监听启动失败"), 5000);
+            return;
+        }
+
+        rxPanel_->clearReceived();
+        rxPanel_->onReceiveProgress(-1);   // 不确定进度（忙碌动画）
+        rxPanel_->onReceiveStatus(QStringLiteral("监听中..."));
+        statusBar()->showMessage(QStringLiteral("麦克风监听中..."));
         return;
     }
 
@@ -734,6 +779,10 @@ void MainWindow::onWavParseFinished(const DecodeResult& result)
 
 void MainWindow::onStopReceiving()
 {
+    // 麦克风实时模式：停止监听并回收段解码线程
+    if (rxMicListening_) {
+        stopRxMicListening();
+    }
     // 中止后台 WAV 解析（结果丢弃，线程自行收尾）
     rxParseAborted_ = true;
     rxPanel_->onReceiveProgress(0);
@@ -743,6 +792,12 @@ void MainWindow::onStopReceiving()
 
 void MainWindow::onRadioStartListening()
 {
+    // 接收面板麦克风监听与电台监听互斥（共享同一输入设备）
+    if (rxMicListening_) {
+        stopRxMicListening();
+        rxPanel_->onReceiveStatus(QStringLiteral("已停止"));
+    }
+
     config_ = settingsDialog_->getPipelineConfig();
 
     // 回收上一次未结束的段解码线程（若有）
@@ -755,9 +810,9 @@ void MainWindow::onRadioStartListening()
 
     // 重置切段状态
     radioListening_ = true;
-    radioSignalSeen_ = false;
-    radioQuietSamples_ = 0;
-    radioSegment_.clear();
+    radioSeg_.buffer.clear();
+    radioSeg_.signalSeen = false;
+    radioSeg_.quietSamples = 0;
     radioAborted_ = false;
     ++radioParseGen_;   // 使任何过期段解码回调失效
 
@@ -791,9 +846,9 @@ void MainWindow::onRadioStopListening()
         delete radioParseThread_;
         radioParseThread_ = nullptr;
     }
-    radioSegment_.clear();
-    radioSignalSeen_ = false;
-    radioQuietSamples_ = 0;
+    radioSeg_.buffer.clear();
+    radioSeg_.signalSeen = false;
+    radioSeg_.quietSamples = 0;
 
     radioPanel_->appendMessage(RadioPanel::MSG_INFO, QStringLiteral("停止监听"));
     radioPanel_->setListening(false);
@@ -831,6 +886,17 @@ void MainWindow::onRadioSend(const QString& textOrFile)
 
 void MainWindow::accumulateRadio(const float* samples, int count)
 {
+    std::vector<float> segment;
+    accumulateSegment(radioSeg_, samples, count, segment);
+    if (!segment.empty()) {
+        submitRadioSegment(segment);
+    }
+}
+
+void MainWindow::accumulateSegment(SegmentState& st,
+                                   const float* samples, int count,
+                                   std::vector<float>& outSegment)
+{
     // 能量门控自动切段：信号出现开始累积，帧尾静音超过切段门限
     // （0.8s）自动提交解码；段超长（30s）强制提交。
     const float signalRms = 0.002f;   // 静音 ~0.0005，信号 ~0.35
@@ -846,43 +912,34 @@ void MainWindow::accumulateRadio(const float* samples, int count)
 
     if (rms > signalRms) {
         // 信号块：重置静音计数并累积
-        radioSignalSeen_ = true;
-        radioQuietSamples_ = 0;
-        radioSegment_.insert(radioSegment_.end(), samples, samples + count);
-    } else if (radioSignalSeen_) {
+        st.signalSeen = true;
+        st.quietSamples = 0;
+        st.buffer.insert(st.buffer.end(), samples, samples + count);
+    } else if (st.signalSeen) {
         // 信号后的静音块：计入段尾，用于切段判定
-        radioQuietSamples_ += static_cast<size_t>(count);
-        radioSegment_.insert(radioSegment_.end(), samples, samples + count);
+        st.quietSamples += static_cast<size_t>(count);
+        st.buffer.insert(st.buffer.end(), samples, samples + count);
     } else {
         // 段外静音不累积
-        radioQuietSamples_ = 0;
+        st.quietSamples = 0;
     }
 
-    // 切段：信号后静音足够长，或段超长
-    if (radioSignalSeen_ &&
-        (radioQuietSamples_ >= quietCut || radioSegment_.size() >= maxSeg)) {
-        submitRadioSegment();
+    // 切段：信号后静音足够长，或段超长；裁掉段尾静音（保留 0.2s
+    // 供帧尾判定），降低解码量
+    if (st.signalSeen &&
+        (st.quietSamples >= quietCut || st.buffer.size() >= maxSeg)) {
+        const size_t keepTail = static_cast<size_t>(config_.sampleRate) / 5;
+        if (st.quietSamples > keepTail) {
+            st.buffer.resize(st.buffer.size() - (st.quietSamples - keepTail));
+        }
+        outSegment.swap(st.buffer);
+        st.signalSeen = false;
+        st.quietSamples = 0;
     }
 }
 
-void MainWindow::submitRadioSegment()
+void MainWindow::submitRadioSegment(std::vector<float>& segment)
 {
-    if (radioSegment_.empty()) {
-        radioSignalSeen_ = false;
-        radioQuietSamples_ = 0;
-        return;
-    }
-
-    // 裁掉段尾静音（保留 0.2s 供帧尾判定），降低解码量
-    std::vector<float> segment;
-    segment.swap(radioSegment_);
-    const size_t keepTail = static_cast<size_t>(config_.sampleRate) / 5;
-    if (radioQuietSamples_ > keepTail) {
-        segment.resize(segment.size() - (radioQuietSamples_ - keepTail));
-    }
-    radioSignalSeen_ = false;
-    radioQuietSamples_ = 0;
-
     // 提交到后台线程解码（与 WAV 解析相同的 RxPipeline 路径）
     if (radioParseThread_ && radioParseThread_->joinable()) {
         radioParseThread_->join();
@@ -939,6 +996,76 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
         }
     }
     statusBar()->showMessage(QStringLiteral("收到电台消息"), 5000);
+}
+
+void MainWindow::accumulateRxMic(const float* samples, int count)
+{
+    std::vector<float> segment;
+    accumulateSegment(rxMicSeg_, samples, count, segment);
+    if (!segment.empty()) {
+        submitRxMicSegment(segment);
+    }
+}
+
+void MainWindow::submitRxMicSegment(std::vector<float>& segment)
+{
+    // 提交到后台线程解码（与电台段解码相同的路径）
+    if (rxMicParseThread_ && rxMicParseThread_->joinable()) {
+        rxMicParseThread_->join();
+        delete rxMicParseThread_;
+        rxMicParseThread_ = nullptr;
+    }
+    PipelineConfig cfg = config_;
+    const int gen = ++rxMicParseGen_;
+    rxMicParseThread_ = new std::thread([this, segment, cfg, gen]() {
+        audiot::RxPipeline rx(cfg);
+        DecodeResult result = rx.decode(segment, true);
+        QMetaObject::invokeMethod(
+            this,
+            [this, gen, result]() {
+                // 已停止监听或已被新段取代：丢弃过期结果
+                if (rxMicAborted_.load() || gen != rxMicParseGen_.load()) {
+                    return;
+                }
+                presentRxMicResult(result);
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::presentRxMicResult(const DecodeResult& result)
+{
+    if (!result.valid()) {
+        rxPanel_->onReceiveStatus(QStringLiteral("检测到信号但未解出数据"));
+        return;
+    }
+
+    // 文本上屏 / 文件弹出保存对话框（与 WAV 解析同一展示路径）
+    presentDecodeResult(result);
+
+    // 自动停止机制：解出完整帧（CRC 校验通过）即视为接收完成
+    stopRxMicListening();
+    rxPanel_->onReceiveStatus(QStringLiteral("接收完成"));
+    statusBar()->showMessage(QStringLiteral("接收完成"), 5000);
+}
+
+void MainWindow::stopRxMicListening()
+{
+    rxMicListening_ = false;
+    if (audioInput_->isRunning()) {
+        audioInput_->stop();
+    }
+
+    // 丢弃未完成的信号段与在途解码结果
+    rxMicAborted_ = true;
+    if (rxMicParseThread_ && rxMicParseThread_->joinable()) {
+        rxMicParseThread_->join();
+        delete rxMicParseThread_;
+        rxMicParseThread_ = nullptr;
+    }
+    rxMicSeg_.buffer.clear();
+    rxMicSeg_.signalSeen = false;
+    rxMicSeg_.quietSamples = 0;
 }
 
 } // namespace audiot

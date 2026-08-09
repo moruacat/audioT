@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QGroupBox>
 #include <QProgressBar>
+#include <QRadioButton>
 
 namespace audiot {
 
@@ -18,9 +19,9 @@ public:
     explicit RxPanel(QWidget* parent = nullptr);
 
 signals:
-    // 解析指定 WAV 文件（后台线程进行）
+    // 解析指定 WAV 文件（后台线程进行）；空路径表示麦克风实时模式
     void startReceiving(const QString& wavPath);
-    // 中止正在进行的解析
+    // 中止正在进行的解析/监听
     void stopReceiving();
 
 public slots:
@@ -35,11 +36,14 @@ private slots:
     void onBrowseWav();
     void onStartClicked();
     void onStopClicked();
+    void onModeChanged();
 
 private:
     void setupUI();
 
-    // Input source
+    // Input source（WAV 文件 / 麦克风实时 双模式）
+    QRadioButton* radioWav_;
+    QRadioButton* radioMic_;
     QLineEdit* wavFilePath_;
     QPushButton* btnBrowse_;
 
