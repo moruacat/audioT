@@ -5,8 +5,12 @@ AudioT is an audio-based data communication application: it encodes **text / fil
 ## Features
 
 ### Data Transmission
-- **Modulation (only AFSK is wired in)**
-  - AFSK (1200/2200 Hz, Bell 202 style) — the default for both the TX/RX pipeline and the command line (currently the only modem connected to the pipeline)
+- **Modulation** (two options, switchable in Settings):
+  - **AFSK** (1200/2200 Hz, Bell 202 style) — default; mature and stable
+  - **MFSK (4-FSK)** (FFT-based) — each symbol picks one of 4 orthogonal
+    frequency slots, carrying 2 bits (default 50 symbols/s, base 1500 Hz /
+    50 Hz slot spacing); demodulation uses an FFT peak decision, giving
+    strong resistance to narrowband single-tone interference and white noise
 - **Forward Error Correction (FEC)** — three options:
   - None
   - Hamming(7,4) — default; corrects single-symbol errors, suited to real acoustic links

@@ -73,9 +73,10 @@ void SettingsDialog::setupUI()
 
     comboModem_ = new QComboBox(this);
     comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
-    // PSK/QAM exist in the codebase but are NOT wired into the TX/RX
-    // pipeline yet (the pipeline always modulates with AFSK), so they
-    // are intentionally left out of the selection list.
+    comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
+    // M-FSK uses the FFT engine (per-symbol orthogonal frequency slots,
+    // 2 bits/symbol by default). Its parameters use pipeline_config
+    // defaults; only AFSK exposes frequency controls above.
     modemLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
 
     spinMarkFreq_ = new QSpinBox(this);

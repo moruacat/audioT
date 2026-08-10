@@ -11,7 +11,8 @@ namespace audiot {
 // TX/RX pipeline; experimental and untested), leaving AFSK as the only
 // active modulation.
 enum class ModemType {
-    AFSK    // Audio Frequency Shift Keying
+    AFSK,   // Audio Frequency Shift Keying
+    MFSK    // Multi-Tone Frequency Shift Keying (FFT-based, 4-FSK default)
 };
 
 // Modem abstract interface: converts between bits and audio samples

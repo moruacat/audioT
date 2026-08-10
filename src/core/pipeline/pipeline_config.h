@@ -30,6 +30,15 @@ struct PipelineConfig {
     float spaceFreq = 2200.0f;
     int baudRate = 1200;
 
+    // M-FSK configuration (used when modemType == MFSK). Each symbol
+    // carries `mftskOrder` bits on one of 1<<mftskOrder orthogonal
+    // frequency slots starting at mftskBaseFreq, spaced mftskSlotSpacing
+    // apart (orthogonal: slotSpacing == sampleRate / samplesPerSymbol).
+    float mftskBaseFreq = 1500.0f;
+    float mftskSlotSpacing = 50.0f;
+    int mftskOrder = 2;        // bits per symbol (4-FSK)
+    int mftskSymbolRate = 50;  // symbols per second
+
     // Duration (seconds) of the continuous prep tone played before the
     // modulated data, giving the receiving device time to prepare
     // (modem-handshake style). Configurable in code; the settings dialog

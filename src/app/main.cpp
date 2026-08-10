@@ -1,4 +1,4 @@
-// main.cpp - AudioT entry point (CLI or Qt GUI)
+﻿// main.cpp - AudioT entry point (CLI or Qt GUI)
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -24,7 +24,7 @@
 #endif
 
 #ifndef AUDIOT_VERSION
-#define AUDIOT_VERSION "1.1.0"
+#define AUDIOT_VERSION "1.2.0"
 #endif
 
 static void printUsage() {

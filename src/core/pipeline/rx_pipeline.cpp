@@ -5,6 +5,7 @@
 #include "fec/hamming.h"
 #include "fec/reed_solomon.h"
 #include "modem/afsk_modem.h"
+#include "modem/mftsk_modem.h"
 #include "audio/wav_reader.h"
 
 #include <algorithm>
@@ -20,7 +21,29 @@ RxPipeline::RxPipeline(const PipelineConfig& config)
 DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec) {
     DecodeResult result;
 
-    // Step 1: AFSK demodulate
+    // Step 1: Demodulate. Chosen modulation by config (AFSK default,
+    // M-FSK optional). M-FSK carries its own preamble sync (multi-phase
+    // FFT peak search), so the AFSK-only prep-tone cropping does not
+    // apply to it.
+    std::vector<float> work = samples;
+    std::vector<uint8_t> fecBits;
+
+    if (config_.modemType == ModemType::MFSK) {
+        MFSKModem::Config mcfg;
+        mcfg.sampleRate = config_.sampleRate;
+        mcfg.baseFreq = config_.mftskBaseFreq;
+        mcfg.slotSpacing = config_.mftskSlotSpacing;
+        mcfg.order = config_.mftskOrder;
+        mcfg.symbolRate = config_.mftskSymbolRate;
+        MFSKModem modem(mcfg);
+        fecBits = modem.demodulate(samples);
+        if (fecBits.empty()) {
+            return result;
+        }
+        return continueFec(fecBits, autoFec);
+    }
+
+    // --- AFSK (default) ---
     AFSKModem::Config modemCfg;
     modemCfg.sampleRate = config_.sampleRate;
     modemCfg.markFreq = config_.markFreq;
@@ -38,7 +61,6 @@ DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec)
     // 31 s of silence + signal produced a perfect fake preamble at the
     // wrong position). Streams without a prep tone (legacy/test signals)
     // are decoded as-is.
-    std::vector<float> work = samples;
     const size_t prepEnd = modem.locatePrepEnd(samples);
     if (prepEnd != std::numeric_limits<size_t>::max()) {
         const size_t kMargin = static_cast<size_t>(config_.sampleRate /
@@ -47,11 +69,18 @@ DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec)
         work.assign(samples.begin() + cropStart, samples.end());
     }
 
-    std::vector<uint8_t> fecBits = modem.demodulate(work);
+    fecBits = modem.demodulate(work);
 
     if (fecBits.empty()) {
         return result;
     }
+
+    return continueFec(fecBits, autoFec);
+}
+
+DecodeResult RxPipeline::continueFec(const std::vector<uint8_t>& fecBits,
+                                     bool autoFec) const {
+    DecodeResult result;
 
     // Step 2: FEC decode. With autoFec, try the configured scheme first
     // and then every other one until a frame validates (demodulation

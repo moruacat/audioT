@@ -67,8 +67,11 @@ void TxPanel::setupUI()
     QFormLayout* configLayout = new QFormLayout(configGroup);
 
     comboModem_ = new QComboBox(this);
-    // 仅 AFSK 已接入流水线；PSK/QAM 为实验代码，已移至 beta/ 归档。
+    // 调制方式、FEC 与采样率的实际生效值取自"设置"对话框
+    // （MainWindow 通过 settingsDialog_->getPipelineConfig() 生效）；
+    // 此处仅供快速查看/占位，改动不会影响实际收发。
     comboModem_->addItem(QStringLiteral("AFSK"));
+    comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"));
     configLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
 
     comboFEC_ = new QComboBox(this);

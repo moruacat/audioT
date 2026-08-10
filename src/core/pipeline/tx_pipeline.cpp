@@ -5,6 +5,7 @@
 #include "fec/hamming.h"
 #include "fec/reed_solomon.h"
 #include "modem/afsk_modem.h"
+#include "modem/mftsk_modem.h"
 #include "audio/wav_writer.h"
 #include "audio/audio_format.h"
 
@@ -102,7 +103,19 @@ std::vector<float> TxPipeline::modulateBits(const std::vector<uint8_t>& bits) {
         fecBits = bits;
     }
 
-    // Step 4: AFSK modulate
+    // Step 4: Modulate (AFSK or M-FSK, chosen by config).
+    if (config_.modemType == ModemType::MFSK) {
+        MFSKModem::Config mcfg;
+        mcfg.sampleRate = config_.sampleRate;
+        mcfg.baseFreq = config_.mftskBaseFreq;
+        mcfg.slotSpacing = config_.mftskSlotSpacing;
+        mcfg.order = config_.mftskOrder;
+        mcfg.symbolRate = config_.mftskSymbolRate;
+        MFSKModem modem(mcfg);
+        return modem.modulate(fecBits);
+    }
+
+    // Default: AFSK (Bell 202 style)
     AFSKModem::Config modemCfg;
     modemCfg.sampleRate = config_.sampleRate;
     modemCfg.markFreq = config_.markFreq;

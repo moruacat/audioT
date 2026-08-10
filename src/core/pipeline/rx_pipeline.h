@@ -55,6 +55,12 @@ private:
     DecodeResult decodeWithFec(const std::vector<uint8_t>& fecBits,
                                FecType fecType) const;
 
+    // Shared FEC stage used by both AFSK and M-FSK demodulation: decode
+    // the demodulated bit stream under autoFec (try configured scheme,
+    // then the others) and return the parsed result.
+    DecodeResult continueFec(const std::vector<uint8_t>& fecBits,
+                             bool autoFec) const;
+
     // Reed-Solomon byte-level decoding of an RS stream produced by
     // TxPipeline::rsEncode: locate the AA 55 sync header, read the
     // 4-byte length, decode each 255-byte block and strip the zero
