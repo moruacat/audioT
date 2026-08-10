@@ -7,6 +7,7 @@
 #include <QSettings>
 #include <QList>
 #include <QShowEvent>
+#include <QMessageBox>
 
 namespace audiot {
 
@@ -74,10 +75,29 @@ void SettingsDialog::setupUI()
     comboModem_ = new QComboBox(this);
     comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
     comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
-    // M-FSK uses the FFT engine (per-symbol orthogonal frequency slots,
-    // 2 bits/symbol by default). Its parameters use pipeline_config
-    // defaults; only AFSK exposes frequency controls above.
+    // M-FSK uses the FFT engine (per-symbol orthogonal frequency slots).
+    // Parameters are chosen via the tier controls below; only AFSK
+    // exposes the mark/space frequency controls.
     modemLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
+
+    comboMftskTier_ = new QComboBox(this);
+    comboMftskTier_->addItem(QStringLiteral("稳健 (50 符号/s, ~100bps)"), static_cast<int>(MftskTier::ROBUST));
+    comboMftskTier_->addItem(QStringLiteral("均衡 (100 符号/s, ~200bps)"), static_cast<int>(MftskTier::BALANCED));
+    comboMftskTier_->addItem(QStringLiteral("高速 (150 符号/s, ~300bps)"), static_cast<int>(MftskTier::SPORT));
+    modemLayout->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
+
+    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式 (AFSK / M-FSK)"), this);
+    // 无线电/双向链路中双方可能使用不同调制；开启后接收端自动尝试两种解调，
+    // 谁的帧合法就采用谁。会增加一次无关解调的耗时。
+    modemLayout->addRow(QStringLiteral(""), checkAutoDetect_);
+    QObject::connect(comboMftskTier_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+        this, [this](int idx) {
+            if (idx >= 0 && comboMftskTier_->itemData(idx).toInt() == static_cast<int>(MftskTier::SPORT)) {
+                QMessageBox::warning(this, QStringLiteral("高速档提示"),
+                    QStringLiteral("高速档 (M-FSK 150 符号/s) 吞吐更高，但对噪声/干扰更敏感，\n"
+                                   "在较差链路上更容易出错。建议仅在信道质量良好时使用。"));
+            }
+        });
 
     spinMarkFreq_ = new QSpinBox(this);
     spinMarkFreq_->setRange(300, 8000);
@@ -197,6 +217,17 @@ void SettingsDialog::loadSettings()
     spinBaudRate_->setValue(settings.value(QStringLiteral("baudRate"), 1200).toInt());
     comboFEC_->setCurrentIndex(
         comboFEC_->findData(settings.value(QStringLiteral("fecType"), 1).toInt()));
+    if (comboMftskTier_) {
+        comboMftskTier_->setCurrentIndex(
+            comboMftskTier_->findData(settings.value(QStringLiteral("mftskTier"),
+                static_cast<int>(MftskTier::BALANCED)).toInt()));
+        if (comboMftskTier_->currentIndex() < 0) {
+            comboMftskTier_->setCurrentIndex(
+                comboMftskTier_->findData(static_cast<int>(MftskTier::BALANCED)));
+        }
+        checkAutoDetect_->setChecked(
+            settings.value(QStringLiteral("autoDetectModem"), true).toBool());
+    }
 }
 
 void SettingsDialog::saveSettings()
@@ -210,6 +241,10 @@ void SettingsDialog::saveSettings()
     settings.setValue(QStringLiteral("spaceFreq"), spinSpaceFreq_->value());
     settings.setValue(QStringLiteral("baudRate"), spinBaudRate_->value());
     settings.setValue(QStringLiteral("fecType"), comboFEC_->currentData().toInt());
+    if (comboMftskTier_) {
+        settings.setValue(QStringLiteral("mftskTier"), comboMftskTier_->currentData().toInt());
+        settings.setValue(QStringLiteral("autoDetectModem"), checkAutoDetect_->isChecked());
+    }
 }
 
 PipelineConfig SettingsDialog::getPipelineConfig() const
@@ -221,6 +256,12 @@ PipelineConfig SettingsDialog::getPipelineConfig() const
     cfg.markFreq = static_cast<float>(spinMarkFreq_->value());
     cfg.spaceFreq = static_cast<float>(spinSpaceFreq_->value());
     cfg.baudRate = spinBaudRate_->value();
+    if (comboMftskTier_) {
+        cfg.mftskTier = static_cast<MftskTier>(comboMftskTier_->currentData().toInt());
+    }
+    if (checkAutoDetect_) {
+        cfg.autoDetectModem = checkAutoDetect_->isChecked();
+    }
     return cfg;
 }
 

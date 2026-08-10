@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
 #include <QAudioDeviceInfo>
@@ -53,6 +54,10 @@ private:
     QSpinBox* spinMarkFreq_;
     QSpinBox* spinSpaceFreq_;
     QSpinBox* spinBaudRate_;
+
+    // M-FSK tier + receive-side auto-detection
+    QComboBox* comboMftskTier_;
+    QCheckBox* checkAutoDetect_;  // auto-detect AFSK / M-FSK on receive
 
     // FEC
     QComboBox* comboFEC_;

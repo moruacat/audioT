@@ -108,9 +108,10 @@ std::vector<float> TxPipeline::modulateBits(const std::vector<uint8_t>& bits) {
         MFSKModem::Config mcfg;
         mcfg.sampleRate = config_.sampleRate;
         mcfg.baseFreq = config_.mftskBaseFreq;
-        mcfg.slotSpacing = config_.mftskSlotSpacing;
-        mcfg.order = config_.mftskOrder;
-        mcfg.symbolRate = config_.mftskSymbolRate;
+        const MftskProfile prof = mftskProfileForTier(config_.mftskTier);
+        mcfg.slotSpacing = prof.slotSpacing;
+        mcfg.order = prof.bitsPerSymbol;
+        mcfg.symbolRate = prof.symbolRate;
         MFSKModem modem(mcfg);
         return modem.modulate(fecBits);
     }

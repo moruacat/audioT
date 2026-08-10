@@ -126,3 +126,104 @@ TEST_CASE("MFSK pipeline: threshold tolerance to leading silence", "[mftsk]") {
     REQUIRE(res.type == DecodeResult::TEXT);
     REQUIRE(res.text == msg);
 }
+
+TEST_CASE("MFSK tiers: symbol rate and slot spacing map", "[mftsk]") {
+    // Every tier must keep the symbol period an exact integer number of
+    // samples at 44100 Hz so FFT bins stay aligned.
+    const MftskProfile rob = mftskProfileForTier(MftskTier::ROBUST);
+    const MftskProfile bal = mftskProfileForTier(MftskTier::BALANCED);
+    const MftskProfile spr = mftskProfileForTier(MftskTier::SPORT);
+
+    REQUIRE(44100 % rob.symbolRate == 0);
+    REQUIRE(44100 % bal.symbolRate == 0);
+    REQUIRE(44100 % spr.symbolRate == 0);
+
+    // Slot spacing must equal sampleRate / samplesPerSymbol (a clean bin).
+    REQUIRE(rob.slotSpacing == Approx(44100.0f / (44100.0f / rob.symbolRate)));
+    REQUIRE(bal.slotSpacing == Approx(44100.0f / (44100.0f / bal.symbolRate)));
+    REQUIRE(spr.slotSpacing == Approx(44100.0f / (44100.0f / spr.symbolRate)));
+
+    REQUIRE(rob.symbolRate < bal.symbolRate);
+    REQUIRE(bal.symbolRate < spr.symbolRate);
+}
+
+TEST_CASE("MFSK tiers: each tier self-decodes", "[mftsk]") {
+    const MftskTier tiers[] = { MftskTier::ROBUST, MftskTier::BALANCED, MftskTier::SPORT };
+    for (MftskTier t : tiers) {
+        PipelineConfig cfg;
+        cfg.modemType = ModemType::MFSK;
+        cfg.mftskTier = t;
+        cfg.fecType = FecType::HAMMING;
+        cfg.autoDetectModem = false;  // exact tier must round-trip on its own
+
+        TxPipeline tx(cfg);
+        const std::string msg = std::string("tier-") + std::to_string(static_cast<int>(t));
+        std::vector<float> audio = tx.encodeTypedText(msg);
+
+        RxPipeline rx(cfg);
+        DecodeResult res = rx.decode(audio, true);
+        INFO("tier " << static_cast<int>(t));
+        REQUIRE(res.valid());
+        REQUIRE(res.type == DecodeResult::TEXT);
+        REQUIRE(res.text == msg);
+    }
+}
+
+TEST_CASE("MFSK auto-detect: AFSK sender decoded by MFSK-configured RX", "[mftsk]") {
+    // Sender uses AFSK; receiver configured for MFSK with auto-detect ON
+    // must still decode it.
+    PipelineConfig txCfg;
+    txCfg.modemType = ModemType::AFSK;
+    txCfg.fecType = FecType::HAMMING;
+    TxPipeline tx(txCfg);
+    const std::string msg = "auto-detect-afsk";
+    std::vector<float> audio = tx.encodeTypedText(msg);
+
+    PipelineConfig rxCfg;
+    rxCfg.modemType = ModemType::MFSK;
+    rxCfg.autoDetectModem = true;   // auto-detect required
+    rxCfg.fecType = FecType::HAMMING;
+    RxPipeline rx(rxCfg);
+    DecodeResult res = rx.decode(audio, true);
+
+    REQUIRE(res.valid());
+    REQUIRE(res.type == DecodeResult::TEXT);
+    REQUIRE(res.text == msg);
+}
+
+TEST_CASE("MFSK auto-detect: MFSK sender decoded by AFSK-configured RX", "[mftsk]") {
+    PipelineConfig txCfg;
+    txCfg.modemType = ModemType::MFSK;
+    txCfg.fecType = FecType::HAMMING;
+    TxPipeline tx(txCfg);
+    const std::string msg = "auto-detect-mfsk";
+    std::vector<float> audio = tx.encodeTypedText(msg);
+
+    PipelineConfig rxCfg;
+    rxCfg.modemType = ModemType::AFSK;
+    rxCfg.autoDetectModem = true;
+    rxCfg.fecType = FecType::HAMMING;
+    RxPipeline rx(rxCfg);
+    DecodeResult res = rx.decode(audio, true);
+
+    REQUIRE(res.valid());
+    REQUIRE(res.type == DecodeResult::TEXT);
+    REQUIRE(res.text == msg);
+}
+
+TEST_CASE("MFSK auto-detect disabled: mismatched modulation fails", "[mftsk]") {
+    PipelineConfig txCfg;
+    txCfg.modemType = ModemType::MFSK;
+    txCfg.fecType = FecType::HAMMING;
+    TxPipeline tx(txCfg);
+    std::vector<float> audio = tx.encodeTypedText("should-not-decode");
+
+    PipelineConfig rxCfg;
+    rxCfg.modemType = ModemType::AFSK;
+    rxCfg.autoDetectModem = false;  // detection OFF -> must not decode MFSK
+    rxCfg.fecType = FecType::HAMMING;
+    RxPipeline rx(rxCfg);
+    DecodeResult res = rx.decode(audio, true);
+
+    REQUIRE_FALSE(res.valid());
+}

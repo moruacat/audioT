@@ -8,9 +8,17 @@ AudioT is an audio-based data communication application: it encodes **text / fil
 - **Modulation** (two options, switchable in Settings):
   - **AFSK** (1200/2200 Hz, Bell 202 style) — default; mature and stable
   - **MFSK (4-FSK)** (FFT-based) — each symbol picks one of 4 orthogonal
-    frequency slots, carrying 2 bits (default 50 symbols/s, base 1500 Hz /
-    50 Hz slot spacing); demodulation uses an FFT peak decision, giving
-    strong resistance to narrowband single-tone interference and white noise
+    frequency slots, carrying 2 bits; demodulation uses an FFT peak
+    decision, giving strong resistance to narrowband single-tone
+    interference and white noise
+- **MFSK tiers** (speed/robustness trade-off, chosen in Settings):
+  - **Robust** — 50 symbols/s ≈ 100 bps, most resilient
+  - **Balanced** (default) — 100 symbols/s ≈ 200 bps
+  - **Sport** — 150 symbols/s ≈ 300 bps, highest throughput but more
+    sensitive; use only on good-quality links
+- **Auto-detect** (optional switch, on by default): the receiver tries
+  both AFSK and M-FSK demodulation and accepts whichever yields a valid
+  frame — no need to coordinate the modulation between the two stations
 - **Forward Error Correction (FEC)** — three options:
   - None
   - Hamming(7,4) — default; corrects single-symbol errors, suited to real acoustic links

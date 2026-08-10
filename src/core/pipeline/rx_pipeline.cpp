@@ -21,61 +21,86 @@ RxPipeline::RxPipeline(const PipelineConfig& config)
 DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec) {
     DecodeResult result;
 
-    // Step 1: Demodulate. Chosen modulation by config (AFSK default,
-    // M-FSK optional). M-FSK carries its own preamble sync (multi-phase
-    // FFT peak search), so the AFSK-only prep-tone cropping does not
-    // apply to it.
-    std::vector<float> work = samples;
-    std::vector<uint8_t> fecBits;
+    // autoDetectModem (via config): try the configured modulation first,
+    // then the other one, returning whichever yields a valid frame. This
+    // lets a receiver cope with a sender that uses a different modulation
+    // without manual re-configuration. Cost is one extra demodulation on
+    // failure; demodulations are cheap.
+    std::vector<std::pair<ModemType, std::vector<float>>> attempts;
 
     if (config_.modemType == ModemType::MFSK) {
-        MFSKModem::Config mcfg;
-        mcfg.sampleRate = config_.sampleRate;
-        mcfg.baseFreq = config_.mftskBaseFreq;
-        mcfg.slotSpacing = config_.mftskSlotSpacing;
-        mcfg.order = config_.mftskOrder;
-        mcfg.symbolRate = config_.mftskSymbolRate;
-        MFSKModem modem(mcfg);
-        fecBits = modem.demodulate(samples);
-        if (fecBits.empty()) {
-            return result;
+        attempts.push_back(std::make_pair(ModemType::MFSK, samples));
+        if (config_.autoDetectModem) {
+            // M-FSK carries its own preamble sync and tolerates leading
+            // silence, so pass the raw buffer; AFSK needs the prep-tone
+            // crop below.
+            attempts.push_back(std::make_pair(ModemType::AFSK, samples));
         }
-        return continueFec(fecBits, autoFec);
+    } else {
+        attempts.push_back(std::make_pair(ModemType::AFSK, samples));
+        if (config_.autoDetectModem) {
+            attempts.push_back(std::make_pair(ModemType::MFSK, samples));
+        }
     }
 
-    // --- AFSK (default) ---
-    AFSKModem::Config modemCfg;
-    modemCfg.sampleRate = config_.sampleRate;
-    modemCfg.markFreq = config_.markFreq;
-    modemCfg.spaceFreq = config_.spaceFreq;
-    modemCfg.baudRate = config_.baudRate;
+    for (size_t a = 0; a < attempts.size(); ++a) {
+        const ModemType mt = attempts[a].first;
+        const std::vector<float>& buf = attempts[a].second;
 
-    AFSKModem modem(modemCfg);
+        if (mt == ModemType::MFSK) {
+            MFSKModem::Config mcfg;
+            mcfg.sampleRate = config_.sampleRate;
+            mcfg.baseFreq = config_.mftskBaseFreq;
+            const MftskProfile prof = mftskProfileForTier(config_.mftskTier);
+            mcfg.slotSpacing = prof.slotSpacing;
+            mcfg.order = prof.bitsPerSymbol;
+            mcfg.symbolRate = prof.symbolRate;
+            MFSKModem modem(mcfg);
+            std::vector<uint8_t> fecBits = modem.demodulate(buf);
+            if (!fecBits.empty()) {
+                DecodeResult r = continueFec(fecBits, autoFec);
+                if (r.valid()) {
+                    return r;
+                }
+            }
+        } else {  // AFSK
+            AFSKModem::Config modemCfg;
+            modemCfg.sampleRate = config_.sampleRate;
+            modemCfg.markFreq = config_.markFreq;
+            modemCfg.spaceFreq = config_.spaceFreq;
+            modemCfg.baudRate = config_.baudRate;
+            AFSKModem modem(modemCfg);
 
-    // The transmitter plays a mandatory continuous prep tone before the
-    // data; its end is the deterministic start of the signal burst (the
-    // preamble begins there). Crop the buffer at that point, keeping a
-    // small symbol margin for window-level detection error, so the
-    // demodulator never sees the long silence preceding the signal:
-    // silence windows decide randomly and can fake a preamble (verified:
-    // 31 s of silence + signal produced a perfect fake preamble at the
-    // wrong position). Streams without a prep tone (legacy/test signals)
-    // are decoded as-is.
-    const size_t prepEnd = modem.locatePrepEnd(samples);
-    if (prepEnd != std::numeric_limits<size_t>::max()) {
-        const size_t kMargin = static_cast<size_t>(config_.sampleRate /
-                                                   config_.baudRate) * 2;
-        const size_t cropStart = prepEnd >= kMargin ? prepEnd - kMargin : 0;
-        work.assign(samples.begin() + cropStart, samples.end());
+            // The transmitter plays a mandatory continuous prep tone before
+            // the data; its end is the deterministic start of the signal
+            // burst (the preamble begins there). Crop the buffer at that
+            // point, keeping a small symbol margin for window-level
+            // detection error, so the demodulator never sees the long
+            // silence preceding the signal: silence windows decide
+            // randomly and can fake a preamble (verified: 31 s of silence +
+            // signal produced a perfect fake preamble at the wrong
+            // position). Streams without a prep tone (legacy/test signals)
+            // are decoded as-is.
+            std::vector<float> work = buf;
+            const size_t prepEnd = modem.locatePrepEnd(buf);
+            if (prepEnd != std::numeric_limits<size_t>::max()) {
+                const size_t kMargin = static_cast<size_t>(config_.sampleRate /
+                                                           config_.baudRate) * 2;
+                const size_t cropStart = prepEnd >= kMargin ? prepEnd - kMargin : 0;
+                work.assign(buf.begin() + cropStart, buf.end());
+            }
+
+            std::vector<uint8_t> fecBits = modem.demodulate(work);
+            if (!fecBits.empty()) {
+                DecodeResult r = continueFec(fecBits, autoFec);
+                if (r.valid()) {
+                    return r;
+                }
+            }
+        }
     }
 
-    fecBits = modem.demodulate(work);
-
-    if (fecBits.empty()) {
-        return result;
-    }
-
-    return continueFec(fecBits, autoFec);
+    return result;
 }
 
 DecodeResult RxPipeline::continueFec(const std::vector<uint8_t>& fecBits,
