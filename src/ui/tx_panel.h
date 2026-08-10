@@ -14,10 +14,18 @@
 
 namespace audiot {
 
+class ModemSettingsWidget;
+
 class TxPanel : public QWidget {
     Q_OBJECT
 public:
     explicit TxPanel(QWidget* parent = nullptr);
+
+    // Per-surface modem/pipeline settings (modulation, M-FSK tier,
+    // auto-detect, FEC). Each panel owns its own configuration.
+    ModemSettingsWidget* modemSettings() const { return modemSettings_; }
+    void loadPanelSettings();
+    void savePanelSettings() const;
 
 signals:
     void startTransmission(const QString& textOrFile);
@@ -47,10 +55,8 @@ private:
     QLineEdit* filePathEdit_;
     QPushButton* btnBrowse_;
 
-    // Configuration
-    QComboBox* comboModem_;
-    QComboBox* comboFEC_;
-    QComboBox* comboSampleRate_;
+    // Configuration (per-surface modem settings widget)
+    ModemSettingsWidget* modemSettings_;
 
     // Output
     QLineEdit* outputWavPath_;

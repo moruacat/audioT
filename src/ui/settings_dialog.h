@@ -53,19 +53,9 @@ private:
     // Audio parameters (advanced/collapsible)
     QComboBox* comboSampleRate_;
     QComboBox* comboBufferSize_;
-
-    // Modulation parameters
-    QComboBox* comboModem_;
     QSpinBox* spinMarkFreq_;
     QSpinBox* spinSpaceFreq_;
     QSpinBox* spinBaudRate_;
-
-    // M-FSK tier + receive-side auto-detection
-    QComboBox* comboMftskTier_;
-    QCheckBox* checkAutoDetect_;  // auto-detect AFSK / M-FSK on receive
-
-    // FEC
-    QComboBox* comboFEC_;
 
     // Advanced controls group (sample rate, buffer, mark/space, baud)
     QGroupBox* advancedGroup_;

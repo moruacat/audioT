@@ -6,8 +6,6 @@
 #include <QGroupBox>
 #include <QSettings>
 #include <QList>
-#include <QCheckBox>
-#include <QMessageBox>
 
 namespace audiot {
 
@@ -47,55 +45,8 @@ void SettingsDialog::setupUI()
     deviceLayout->addRow(QString(), btnRefreshDevices_);
     mainLayout->addWidget(deviceGroup);
 
-    // --- Modulation parameters ---
-    QGroupBox* modemGroup = new QGroupBox(QStringLiteral("调制参数"), this);
-    QFormLayout* modemLayout = new QFormLayout(modemGroup);
-
-    comboModem_ = new QComboBox(modemGroup);
-    comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
-    comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
-    modemLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
-
-    comboMftskTier_ = new QComboBox(modemGroup);
-    comboMftskTier_->addItem(QStringLiteral("稳健 (50/s)"), static_cast<int>(MftskTier::ROBUST));
-    comboMftskTier_->addItem(QStringLiteral("均衡 (100/s)"), static_cast<int>(MftskTier::BALANCED));
-    comboMftskTier_->addItem(QStringLiteral("高速 (150/s)"), static_cast<int>(MftskTier::SPORT));
-    modemLayout->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
-
-    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式"), modemGroup);
-    modemLayout->addRow(QStringLiteral(""), checkAutoDetect_);
-
-    QObject::connect(comboMftskTier_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-        this, [this](int idx) {
-            if (idx >= 0 && comboMftskTier_->itemData(idx).toInt() == static_cast<int>(MftskTier::SPORT)) {
-                QMessageBox::warning(this, QStringLiteral("高速档提示"),
-                    QStringLiteral("高速档 (M-FSK 150 符号/s) 吞吐更高，但对噪声/干扰更敏感，\n"
-                                   "在较差链路上更容易出错。建议仅在信道质量良好时使用。"));
-            }
-            saveSettings();
-        });
-
-    // 调制方式、自动检测变更时即时保存
-    connect(comboModem_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-            this, &SettingsDialog::saveSettings);
-    connect(checkAutoDetect_, &QCheckBox::toggled, this, &SettingsDialog::saveSettings);
-
-    mainLayout->addWidget(modemGroup);
-
-    // --- FEC ---
-    QGroupBox* fecGroup = new QGroupBox(QStringLiteral("纠错编码"), this);
-    QFormLayout* fecLayout = new QFormLayout(fecGroup);
-
-    comboFEC_ = new QComboBox(fecGroup);
-    comboFEC_->addItem(QStringLiteral("None"), 0);
-    comboFEC_->addItem(QStringLiteral("Hamming"), 1);
-    comboFEC_->addItem(QStringLiteral("Reed-Solomon"), 2);
-    comboFEC_->setCurrentIndex(1);
-    fecLayout->addRow(QStringLiteral("FEC 类型:"), comboFEC_);
-    connect(comboFEC_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-            this, &SettingsDialog::saveSettings);
-
-    mainLayout->addWidget(fecGroup);
+    // (调制参数/FEC 已移入各收发选项卡的 ModemSettingsWidget，
+    //  此处仅保留音频设备与高级参数)
 
     // --- Advanced / collapsible ---
     advancedGroup_ = new QGroupBox(QStringLiteral("高级设置"), this);
@@ -211,28 +162,9 @@ void SettingsDialog::loadSettings()
         comboSampleRate_->findData(settings.value(QStringLiteral("sampleRate"), 44100).toInt()));
     comboBufferSize_->setCurrentIndex(
         comboBufferSize_->findData(settings.value(QStringLiteral("bufferSize"), 1024).toInt()));
-    comboModem_->setCurrentIndex(
-        comboModem_->findData(settings.value(QStringLiteral("modemType"), 0).toInt()));
-    // Fall back to AFSK if the saved modem type is no longer selectable
-    if (comboModem_->currentIndex() < 0) {
-        comboModem_->setCurrentIndex(0);
-    }
     spinMarkFreq_->setValue(settings.value(QStringLiteral("markFreq"), 1200).toInt());
     spinSpaceFreq_->setValue(settings.value(QStringLiteral("spaceFreq"), 2200).toInt());
     spinBaudRate_->setValue(settings.value(QStringLiteral("baudRate"), 1200).toInt());
-    comboFEC_->setCurrentIndex(
-        comboFEC_->findData(settings.value(QStringLiteral("fecType"), 1).toInt()));
-    if (comboMftskTier_) {
-        comboMftskTier_->setCurrentIndex(
-            comboMftskTier_->findData(settings.value(QStringLiteral("mftskTier"),
-                static_cast<int>(MftskTier::BALANCED)).toInt()));
-        if (comboMftskTier_->currentIndex() < 0) {
-            comboMftskTier_->setCurrentIndex(
-                comboMftskTier_->findData(static_cast<int>(MftskTier::BALANCED)));
-        }
-        checkAutoDetect_->setChecked(
-            settings.value(QStringLiteral("autoDetectModem"), true).toBool());
-    }
 }
 
 void SettingsDialog::saveSettings()
@@ -241,32 +173,21 @@ void SettingsDialog::saveSettings()
 
     settings.setValue(QStringLiteral("sampleRate"), comboSampleRate_->currentData().toInt());
     settings.setValue(QStringLiteral("bufferSize"), comboBufferSize_->currentData().toInt());
-    settings.setValue(QStringLiteral("modemType"), comboModem_->currentData().toInt());
     settings.setValue(QStringLiteral("markFreq"), spinMarkFreq_->value());
     settings.setValue(QStringLiteral("spaceFreq"), spinSpaceFreq_->value());
     settings.setValue(QStringLiteral("baudRate"), spinBaudRate_->value());
-    settings.setValue(QStringLiteral("fecType"), comboFEC_->currentData().toInt());
-    if (comboMftskTier_) {
-        settings.setValue(QStringLiteral("mftskTier"), comboMftskTier_->currentData().toInt());
-        settings.setValue(QStringLiteral("autoDetectModem"), checkAutoDetect_->isChecked());
-    }
 }
 
 PipelineConfig SettingsDialog::getPipelineConfig() const
 {
+    // 仅提供采样率/高级参数（Mark/Space/波特率）；调制方式、FEC、
+    // M-FSK 档位、自动检测由各收发选项卡的 ModemSettingsWidget 提供，
+    // MainWindow::surfaceConfig() 负责合并。
     PipelineConfig cfg;
     cfg.sampleRate = comboSampleRate_->currentData().toInt();
-    cfg.modemType = static_cast<ModemType>(comboModem_->currentData().toInt());
-    cfg.fecType = static_cast<FecType>(comboFEC_->currentData().toInt());
     cfg.markFreq = static_cast<float>(spinMarkFreq_->value());
     cfg.spaceFreq = static_cast<float>(spinSpaceFreq_->value());
     cfg.baudRate = spinBaudRate_->value();
-    if (comboMftskTier_) {
-        cfg.mftskTier = static_cast<MftskTier>(comboMftskTier_->currentData().toInt());
-    }
-    if (checkAutoDetect_) {
-        cfg.autoDetectModem = checkAutoDetect_->isChecked();
-    }
     return cfg;
 }
 

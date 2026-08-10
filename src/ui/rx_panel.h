@@ -17,11 +17,18 @@ class QImage;
 namespace audiot {
 
 class SSTVViewer;
+class ModemSettingsWidget;
 
 class RxPanel : public QWidget {
     Q_OBJECT
 public:
     explicit RxPanel(QWidget* parent = nullptr);
+
+    // Per-surface modem/pipeline settings (modulation, M-FSK tier,
+    // auto-detect, FEC). Each panel owns its own configuration.
+    ModemSettingsWidget* modemSettings() const { return modemSettings_; }
+    void loadPanelSettings();
+    void savePanelSettings() const;
 
 signals:
     // 解析指定 WAV 文件（后台线程进行）；空路径表示麦克风实时模式
@@ -58,6 +65,9 @@ private:
     QRadioButton* radioSstv_;
     QLineEdit* wavFilePath_;
     QPushButton* btnBrowse_;
+
+    // Per-surface modem settings widget
+    ModemSettingsWidget* modemSettings_;
 
     // Output（文本页 / SSTV 图片页 切换显示）
     QStackedWidget* recvStack_;

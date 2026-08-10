@@ -1,6 +1,7 @@
 // rx_panel.cpp - Receive panel widget implementation
 #include "rx_panel.h"
 #include "sstv_viewer.h"
+#include "modem_settings_widget.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -14,8 +15,23 @@ namespace audiot {
 
 RxPanel::RxPanel(QWidget* parent)
     : QWidget(parent)
+    , modemSettings_(nullptr)
 {
     setupUI();
+}
+
+void RxPanel::loadPanelSettings()
+{
+    if (modemSettings_) {
+        modemSettings_->loadSettings(QStringLiteral("rx"));
+    }
+}
+
+void RxPanel::savePanelSettings() const
+{
+    if (modemSettings_) {
+        modemSettings_->saveSettings(QStringLiteral("rx"));
+    }
 }
 
 void RxPanel::setupUI()
@@ -87,6 +103,10 @@ void RxPanel::setupUI()
     recvLayout->addWidget(recvStack_);
 
     mainLayout->addWidget(recvGroup);
+
+    // --- Per-surface modem settings ---
+    modemSettings_ = new ModemSettingsWidget(this);
+    mainLayout->addWidget(modemSettings_);
 
     // --- Control ---
     QHBoxLayout* controlLayout = new QHBoxLayout();

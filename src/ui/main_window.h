@@ -24,6 +24,7 @@ class RxPanel;
 class RadioPanel;
 class AudioMonitor;
 class SettingsDialog;
+class ModemSettingsWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -111,6 +112,10 @@ private:
     bool encodeTxInput(const QString& textOrFile, const PipelineConfig& config,
                        std::vector<float>& outSamples, QString& errorMsg);
 
+    // 合并配置：以右侧面板（设备/采样率/高级参数）为基础，用指定
+    // 面板的调制设置（调制方式/FEC/档位/自动检测）覆盖调制字段。
+    PipelineConfig surfaceConfig(const ModemSettingsWidget* modem) const;
+
     // UI components
     TxPanel* txPanel_;
     RxPanel* rxPanel_;
@@ -128,7 +133,6 @@ private:
     PipelineConfig config_;
 
     // Menu actions
-    QAction* actionSettings_;
     QAction* actionAbout_;
 
     // TX playback state

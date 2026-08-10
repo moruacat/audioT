@@ -1,5 +1,6 @@
 // tx_panel.cpp - Transmit panel widget implementation
 #include "tx_panel.h"
+#include "modem_settings_widget.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -12,8 +13,23 @@ namespace audiot {
 
 TxPanel::TxPanel(QWidget* parent)
     : QWidget(parent)
+    , modemSettings_(nullptr)
 {
     setupUI();
+}
+
+void TxPanel::loadPanelSettings()
+{
+    if (modemSettings_) {
+        modemSettings_->loadSettings(QStringLiteral("tx"));
+    }
+}
+
+void TxPanel::savePanelSettings() const
+{
+    if (modemSettings_) {
+        modemSettings_->saveSettings(QStringLiteral("tx"));
+    }
 }
 
 void TxPanel::setupUI()
@@ -62,32 +78,9 @@ void TxPanel::setupUI()
 
     mainLayout->addWidget(inputGroup);
 
-    // --- Configuration group ---
-    QGroupBox* configGroup = new QGroupBox(QStringLiteral("调制配置"), this);
-    QFormLayout* configLayout = new QFormLayout(configGroup);
-
-    comboModem_ = new QComboBox(this);
-    // 调制方式、FEC 与采样率的实际生效值取自"设置"对话框
-    // （MainWindow 通过 settingsDialog_->getPipelineConfig() 生效）；
-    // 此处仅供快速查看/占位，改动不会影响实际收发。
-    comboModem_->addItem(QStringLiteral("AFSK"));
-    comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"));
-    configLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
-
-    comboFEC_ = new QComboBox(this);
-    comboFEC_->addItem(QStringLiteral("None"));
-    comboFEC_->addItem(QStringLiteral("Hamming"));
-    comboFEC_->addItem(QStringLiteral("Reed-Solomon"));
-    configLayout->addRow(QStringLiteral("纠错编码:"), comboFEC_);
-
-    comboSampleRate_ = new QComboBox(this);
-    comboSampleRate_->addItem(QStringLiteral("22050"));
-    comboSampleRate_->addItem(QStringLiteral("44100"));
-    comboSampleRate_->addItem(QStringLiteral("48000"));
-    comboSampleRate_->setCurrentIndex(1); // 44100 default
-    configLayout->addRow(QStringLiteral("采样率:"), comboSampleRate_);
-
-    mainLayout->addWidget(configGroup);
+    // --- Configuration (per-surface modem settings) ---
+    modemSettings_ = new ModemSettingsWidget(this);
+    mainLayout->addWidget(modemSettings_);
 
     // --- Output group ---
     QGroupBox* outputGroup = new QGroupBox(QStringLiteral("输出 WAV 文件"), this);

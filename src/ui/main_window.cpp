@@ -5,6 +5,7 @@
 #include "radio_panel.h"
 #include "audio_monitor.h"
 #include "settings_dialog.h"
+#include "modem_settings_widget.h"
 
 #include <QMenuBar>
 #include <QStatusBar>
@@ -102,10 +103,16 @@ MainWindow::MainWindow(QWidget* parent)
 
     // 设置面板常驻右侧：延迟到事件循环开始后枚举音频设备，
     // 避免启动时立即枚举 QAudioDeviceInfo 在部分 Windows 系统上崩溃。
+    // 同时加载各收发选项卡的调制设置（INI 配置文件，失败即默认）。
     QTimer::singleShot(0, this, [this]() {
         if (settingsDialog_) {
             settingsDialog_->ensureDevicesLoaded();
         }
+        if (txPanel_) txPanel_->loadPanelSettings();
+        if (rxPanel_) rxPanel_->loadPanelSettings();
+        if (radioPanel_) radioPanel_->loadPanelSettings();
+        // 应用设备选择（原"工具→设置"入口逻辑，菜单已移除）
+        onSettings();
     });
 
     statusBar()->showMessage(QStringLiteral("就绪"));
@@ -203,11 +210,8 @@ void MainWindow::setupMenuBar()
     actionExit->setShortcut(QKeySequence::Quit);
     connect(actionExit, &QAction::triggered, qApp, &QApplication::quit);
 
-    // Settings menu
-    QMenu* toolsMenu = menuBar()->addMenu(QStringLiteral("工具"));
-    actionSettings_ = toolsMenu->addAction(QStringLiteral("设置..."));
-    actionSettings_->setShortcut(QKeySequence::Preferences);
-    connect(actionSettings_, &QAction::triggered, this, &MainWindow::onSettings);
+    // (工具菜单已移除：调制/FEC 设置移入各收发选项卡，
+    //  设备/高级设置常驻右侧面板，无需弹窗入口)
 
     // Help menu
     QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("帮助"));
@@ -274,6 +278,21 @@ void MainWindow::onSettings()
     statusBar()->showMessage(QStringLiteral("设置已更新"), 3000);
 }
 
+PipelineConfig MainWindow::surfaceConfig(const ModemSettingsWidget* modem) const
+{
+    // 以右侧面板（设备/采样率/高级参数）为基础配置，
+    // 再用面板自有的调制设置覆盖调制相关字段。
+    PipelineConfig cfg = settingsDialog_->getPipelineConfig();
+    if (modem) {
+        const PipelineConfig m = modem->getPipelineConfig();
+        cfg.modemType = m.modemType;
+        cfg.fecType = m.fecType;
+        cfg.mftskTier = m.mftskTier;
+        cfg.autoDetectModem = m.autoDetectModem;
+    }
+    return cfg;
+}
+
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, QStringLiteral("关于 AudioT"),
@@ -292,7 +311,7 @@ void MainWindow::onStartTransmission(const QString& textOrFile)
         finishTxPlayback(true);
     }
 
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(txPanel_->modemSettings());
     statusBar()->showMessage(QStringLiteral("开始发射..."));
 
     // SSTV 图片：编码为 SSTV 音频（自带头部），直接播放
@@ -427,7 +446,7 @@ void MainWindow::onExportWav(const QString& textOrFile, const QString& path)
     // 与发射无关：直接取当前输入 + 配置现场编码后写入文件。
     // 编码/写文件在后台线程进行（大输入不阻塞 UI），进度经
     // onExportProgress 回报到发射面板进度条。
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(txPanel_->modemSettings());
     txPanel_->onTransmissionProgress(0);
     txPanel_->onTransmissionStatus(QStringLiteral("导出中..."));
     statusBar()->showMessage(QStringLiteral("导出 WAV 中..."));
@@ -786,7 +805,7 @@ void MainWindow::onStartReceiving(const QString& wavPath)
         if (sstvListening_) {
             stopSstvListening();
         }
-        config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(rxPanel_->modemSettings());
 
         // 回收上一次未结束的段解码线程（若有）
         rxMicAborted_ = true;
@@ -820,7 +839,7 @@ void MainWindow::onStartReceiving(const QString& wavPath)
         return;
     }
 
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(rxPanel_->modemSettings());
 
     // WAV 文件模式：后台线程一次性解析整个文件，不阻塞 UI
     rxPanel_->clearReceived();
@@ -980,7 +999,7 @@ void MainWindow::onRadioStartListening()
         rxPanel_->onReceiveStatus(QStringLiteral("已停止"));
     }
 
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(radioPanel_->modemSettings());
 
     // 回收上一次未结束的段解码线程（若有）
     radioAborted_ = true;
@@ -1044,7 +1063,7 @@ void MainWindow::onRadioSend(const QString& textOrFile)
         finishTxPlayback(true);
     }
 
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(radioPanel_->modemSettings());
     std::vector<float> dataSamples;
     QString err;
     if (!encodeTxInput(textOrFile, config_, dataSamples, err)) {
@@ -1252,7 +1271,7 @@ void MainWindow::stopRxMicListening()
 
 void MainWindow::onStartSstv(const QString& wavPath)
 {
-    config_ = settingsDialog_->getPipelineConfig();
+    config_ = surfaceConfig(rxPanel_->modemSettings());
 
     if (wavPath.isEmpty()) {
         // SSTV 麦克风监听：头部检测 + 整帧累积（与电台/麦克风监听互斥）

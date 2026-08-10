@@ -1,5 +1,6 @@
 // radio_panel.cpp - 电台模式面板实现
 #include "radio_panel.h"
+#include "modem_settings_widget.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -13,17 +14,32 @@
 
 namespace audiot {
 
+RadioPanel::RadioPanel(QWidget* parent)
+    : QWidget(parent)
+    , modemSettings_(nullptr)
+{
+    setupUI();
+}
+
+void RadioPanel::loadPanelSettings()
+{
+    if (modemSettings_) {
+        modemSettings_->loadSettings(QStringLiteral("radio"));
+    }
+}
+
+void RadioPanel::savePanelSettings() const
+{
+    if (modemSettings_) {
+        modemSettings_->saveSettings(QStringLiteral("radio"));
+    }
+}
+
 namespace {
 // 气泡对话框样式参数（类似聊天软件）
 const int kBubbleMaxWidth = 460;   // 气泡最大宽度（长文本换行）
 const int kBubblePadX = 12;        // 气泡左右内边距（共）
 const int kBubblePadY = 8;         // 气泡上下内边距（共）
-}
-
-RadioPanel::RadioPanel(QWidget* parent)
-    : QWidget(parent)
-{
-    setupUI();
 }
 
 void RadioPanel::setupUI()
@@ -69,6 +85,10 @@ void RadioPanel::setupUI()
     ctlLayout->addWidget(labelStatus_);
     ctlLayout->addStretch();
     mainLayout->addLayout(ctlLayout);
+
+    // --- Per-surface modem settings ---
+    modemSettings_ = new ModemSettingsWidget(this);
+    mainLayout->addWidget(modemSettings_);
 
     // Connections
     connect(inputLine_, &QLineEdit::returnPressed, this, &RadioPanel::onSendClicked);

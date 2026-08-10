@@ -12,6 +12,8 @@ class QResizeEvent;
 
 namespace audiot {
 
+class ModemSettingsWidget;
+
 // 电台模式：一台电脑即一个电台站。
 // - 发送：输入文本或选择文件，经扬声器（输出设备）发射
 // - 接收：麦克风（输入设备）持续监听，自动切段解码后显示在此
@@ -26,6 +28,12 @@ public:
     };
 
     explicit RadioPanel(QWidget* parent = nullptr);
+
+    // Per-surface modem/pipeline settings (modulation, M-FSK tier,
+    // auto-detect, FEC). Each panel owns its own configuration.
+    ModemSettingsWidget* modemSettings() const { return modemSettings_; }
+    void loadPanelSettings();
+    void savePanelSettings() const;
 
 signals:
     void startListening();
@@ -59,6 +67,7 @@ private:
     QPushButton* btnListen_;
     QPushButton* btnStop_;
     QLabel* labelStatus_;
+    ModemSettingsWidget* modemSettings_;
 };
 
 } // namespace audiot
