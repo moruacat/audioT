@@ -10,6 +10,8 @@
 #include <QStatusBar>
 #include <QMessageBox>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QTimer>
 #include <QApplication>
 #include <QFile>
 #include <QFileDialog>
@@ -98,6 +100,14 @@ MainWindow::MainWindow(QWidget* parent)
     setupStatusBar();
     connectSignals();
 
+    // 设置面板常驻右侧：延迟到事件循环开始后枚举音频设备，
+    // 避免启动时立即枚举 QAudioDeviceInfo 在部分 Windows 系统上崩溃。
+    QTimer::singleShot(0, this, [this]() {
+        if (settingsDialog_) {
+            settingsDialog_->ensureDevicesLoaded();
+        }
+    });
+
     statusBar()->showMessage(QStringLiteral("就绪"));
 }
 
@@ -146,21 +156,28 @@ MainWindow::~MainWindow()
 
 void MainWindow::setupUI()
 {
-    // Central widget with vertical layout
+    // Central widget with horizontal layout: main area + settings panel
     QWidget* central = new QWidget(this);
-    QVBoxLayout* mainLayout = new QVBoxLayout(central);
-    mainLayout->setContentsMargins(4, 4, 4, 4);
+    QHBoxLayout* rootLayout = new QHBoxLayout(central);
+    rootLayout->setContentsMargins(4, 4, 4, 4);
+    rootLayout->setSpacing(6);
+
+    // Left: audio monitor + tab widget
+    QWidget* left = new QWidget(central);
+    QVBoxLayout* mainLayout = new QVBoxLayout(left);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(4);
 
     // Audio monitor at top
-    audioMonitor_ = new AudioMonitor(this);
+    audioMonitor_ = new AudioMonitor(left);
     mainLayout->addWidget(audioMonitor_);
 
     // Tab widget for TX/RX/Radio
-    tabWidget_ = new QTabWidget(this);
+    tabWidget_ = new QTabWidget(left);
 
-    txPanel_ = new TxPanel(this);
-    rxPanel_ = new RxPanel(this);
-    radioPanel_ = new RadioPanel(this);
+    txPanel_ = new TxPanel(left);
+    rxPanel_ = new RxPanel(left);
+    radioPanel_ = new RadioPanel(left);
 
     tabWidget_->addTab(txPanel_, QStringLiteral("发射"));
     tabWidget_->addTab(rxPanel_, QStringLiteral("接收"));
@@ -168,10 +185,14 @@ void MainWindow::setupUI()
 
     mainLayout->addWidget(tabWidget_);
 
-    setCentralWidget(central);
+    rootLayout->addWidget(left, 1);
 
-    // Create settings dialog (lazy, parented to this)
-    settingsDialog_ = new SettingsDialog(audioDeviceManager_, this);
+    // Right: persistent settings panel (常驻，无需再打开弹窗)
+    settingsDialog_ = new SettingsDialog(audioDeviceManager_, central);
+    settingsDialog_->setObjectName(QStringLiteral("settingsPanel"));
+    rootLayout->addWidget(settingsDialog_, 0);
+
+    setCentralWidget(central);
 }
 
 void MainWindow::setupMenuBar()
@@ -243,15 +264,14 @@ void MainWindow::connectSignals()
 
 void MainWindow::onSettings()
 {
-    if (settingsDialog_->exec() == QDialog::Accepted) {
-        config_ = settingsDialog_->getPipelineConfig();
-        // Apply selected audio devices to the streams
-        QAudioDeviceInfo inDev = settingsDialog_->selectedInputDevice();
-        QAudioDeviceInfo outDev = settingsDialog_->selectedOutputDevice();
-        if (!inDev.isNull()) audioInput_->setDevice(inDev);
-        if (!outDev.isNull()) audioOutput_->setDevice(outDev);
-        statusBar()->showMessage(QStringLiteral("设置已更新"), 3000);
-    }
+    // 设置面板已常驻右侧，无需弹窗；此处仅将当前面板配置应用到收发链路
+    // （设备选择/采样率/调制/FEC 等变更即时生效）。
+    config_ = settingsDialog_->getPipelineConfig();
+    QAudioDeviceInfo inDev = settingsDialog_->selectedInputDevice();
+    QAudioDeviceInfo outDev = settingsDialog_->selectedOutputDevice();
+    if (!inDev.isNull()) audioInput_->setDevice(inDev);
+    if (!outDev.isNull()) audioOutput_->setDevice(outDev);
+    statusBar()->showMessage(QStringLiteral("设置已更新"), 3000);
 }
 
 void MainWindow::onAbout()

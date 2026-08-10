@@ -1,21 +1,24 @@
-// settings_dialog.h - Settings dialog for audio device and pipeline configuration
+// settings_dialog.h - Persistent settings panel (right-hand side of the
+// main window). Replaces the old modal dialog: audio device + pipeline
+// configuration is always visible and applied live.
 #ifndef AUDIOT_SETTINGS_DIALOG_H
 #define AUDIOT_SETTINGS_DIALOG_H
 
-#include <QDialog>
+#include <QWidget>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QCheckBox>
-#include <QDialogButtonBox>
 #include <QPushButton>
 #include <QAudioDeviceInfo>
 
 #include "audio/audio_device.h"
 #include "core/pipeline/pipeline_config.h"
 
+class QGroupBox;
+
 namespace audiot {
 
-class SettingsDialog : public QDialog {
+class SettingsDialog : public QWidget {
     Q_OBJECT
 public:
     explicit SettingsDialog(AudioDeviceManager* deviceManager, QWidget* parent = nullptr);
@@ -25,17 +28,19 @@ public:
     QAudioDeviceInfo selectedInputDevice() const;
     QAudioDeviceInfo selectedOutputDevice() const;
 
-private slots:
-    void loadSettings();
-    void saveSettings();
-    void onRefreshDevices();
+    // Deferred device enumeration; call once after the panel becomes visible.
+    void ensureDevicesLoaded();
 
-protected:
-    void showEvent(QShowEvent* event) override;
+public slots:
+    void saveSettings();
+
+private slots:
+    void onRefreshDevices();
 
 private:
     void setupUI();
     void populateDevices();
+    void loadSettings();
 
     AudioDeviceManager* deviceManager_;
     bool devicesLoaded_;
@@ -45,7 +50,7 @@ private:
     QComboBox* comboOutputDevice_;
     QPushButton* btnRefreshDevices_;
 
-    // Audio parameters
+    // Audio parameters (advanced/collapsible)
     QComboBox* comboSampleRate_;
     QComboBox* comboBufferSize_;
 
@@ -62,8 +67,8 @@ private:
     // FEC
     QComboBox* comboFEC_;
 
-    // Buttons
-    QDialogButtonBox* buttonBox_;
+    // Advanced controls group (sample rate, buffer, mark/space, baud)
+    QGroupBox* advancedGroup_;
 };
 
 } // namespace audiot

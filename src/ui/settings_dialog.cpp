@@ -1,4 +1,4 @@
-// settings_dialog.cpp - Settings dialog implementation
+// settings_dialog.cpp - Persistent settings panel (right-hand side)
 #include "settings_dialog.h"
 
 #include <QVBoxLayout>
@@ -6,18 +6,17 @@
 #include <QGroupBox>
 #include <QSettings>
 #include <QList>
-#include <QShowEvent>
+#include <QCheckBox>
 #include <QMessageBox>
 
 namespace audiot {
 
 SettingsDialog::SettingsDialog(AudioDeviceManager* deviceManager, QWidget* parent)
-    : QDialog(parent)
+    : QWidget(parent)
     , deviceManager_(deviceManager)
     , devicesLoaded_(false)
 {
-    setWindowTitle(QStringLiteral("AudioT 设置"));
-    setMinimumWidth(400);
+    setMinimumWidth(230);
     setupUI();
     loadSettings();
 }
@@ -25,17 +24,19 @@ SettingsDialog::SettingsDialog(AudioDeviceManager* deviceManager, QWidget* paren
 void SettingsDialog::setupUI()
 {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(2, 2, 2, 2);
 
     // --- Audio devices ---
     QGroupBox* deviceGroup = new QGroupBox(QStringLiteral("音频设备"), this);
     QFormLayout* deviceLayout = new QFormLayout(deviceGroup);
 
-    comboInputDevice_ = new QComboBox(this);
-    comboOutputDevice_ = new QComboBox(this);
-    btnRefreshDevices_ = new QPushButton(QStringLiteral("刷新设备"), this);
+    comboInputDevice_ = new QComboBox(deviceGroup);
+    comboOutputDevice_ = new QComboBox(deviceGroup);
+    btnRefreshDevices_ = new QPushButton(QStringLiteral("刷新设备"), deviceGroup);
 
-    // Device enumeration is deferred to first show (early enumeration of
-    // QAudioDeviceInfo::availableDevices() can crash on some Windows systems)
+    // Device enumeration is deferred to ensureDevicesLoaded() (early
+    // enumeration of QAudioDeviceInfo::availableDevices() can crash on
+    // some Windows systems).
     comboInputDevice_->addItem(QStringLiteral("默认输入设备"));
     comboOutputDevice_->addItem(QStringLiteral("默认输出设备"));
     connect(btnRefreshDevices_, &QPushButton::clicked,
@@ -46,50 +47,24 @@ void SettingsDialog::setupUI()
     deviceLayout->addRow(QString(), btnRefreshDevices_);
     mainLayout->addWidget(deviceGroup);
 
-    // --- Audio parameters ---
-    QGroupBox* audioGroup = new QGroupBox(QStringLiteral("音频参数"), this);
-    QFormLayout* audioLayout = new QFormLayout(audioGroup);
-
-    comboSampleRate_ = new QComboBox(this);
-    comboSampleRate_->addItem(QStringLiteral("22050"), 22050);
-    comboSampleRate_->addItem(QStringLiteral("44100"), 44100);
-    comboSampleRate_->addItem(QStringLiteral("48000"), 48000);
-    comboSampleRate_->setCurrentIndex(1);
-    audioLayout->addRow(QStringLiteral("采样率:"), comboSampleRate_);
-
-    comboBufferSize_ = new QComboBox(this);
-    comboBufferSize_->addItem(QStringLiteral("256"), 256);
-    comboBufferSize_->addItem(QStringLiteral("512"), 512);
-    comboBufferSize_->addItem(QStringLiteral("1024"), 1024);
-    comboBufferSize_->addItem(QStringLiteral("2048"), 2048);
-    comboBufferSize_->addItem(QStringLiteral("4096"), 4096);
-    comboBufferSize_->setCurrentIndex(2); // 1024 default
-    audioLayout->addRow(QStringLiteral("缓冲区大小:"), comboBufferSize_);
-
-    mainLayout->addWidget(audioGroup);
-
     // --- Modulation parameters ---
     QGroupBox* modemGroup = new QGroupBox(QStringLiteral("调制参数"), this);
     QFormLayout* modemLayout = new QFormLayout(modemGroup);
 
-    comboModem_ = new QComboBox(this);
+    comboModem_ = new QComboBox(modemGroup);
     comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
     comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
-    // M-FSK uses the FFT engine (per-symbol orthogonal frequency slots).
-    // Parameters are chosen via the tier controls below; only AFSK
-    // exposes the mark/space frequency controls.
     modemLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
 
-    comboMftskTier_ = new QComboBox(this);
-    comboMftskTier_->addItem(QStringLiteral("稳健 (50 符号/s, ~100bps)"), static_cast<int>(MftskTier::ROBUST));
-    comboMftskTier_->addItem(QStringLiteral("均衡 (100 符号/s, ~200bps)"), static_cast<int>(MftskTier::BALANCED));
-    comboMftskTier_->addItem(QStringLiteral("高速 (150 符号/s, ~300bps)"), static_cast<int>(MftskTier::SPORT));
+    comboMftskTier_ = new QComboBox(modemGroup);
+    comboMftskTier_->addItem(QStringLiteral("稳健 (50/s)"), static_cast<int>(MftskTier::ROBUST));
+    comboMftskTier_->addItem(QStringLiteral("均衡 (100/s)"), static_cast<int>(MftskTier::BALANCED));
+    comboMftskTier_->addItem(QStringLiteral("高速 (150/s)"), static_cast<int>(MftskTier::SPORT));
     modemLayout->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
 
-    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式 (AFSK / M-FSK)"), this);
-    // 无线电/双向链路中双方可能使用不同调制；开启后接收端自动尝试两种解调，
-    // 谁的帧合法就采用谁。会增加一次无关解调的耗时。
+    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式"), modemGroup);
     modemLayout->addRow(QStringLiteral(""), checkAutoDetect_);
+
     QObject::connect(comboMftskTier_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
         this, [this](int idx) {
             if (idx >= 0 && comboMftskTier_->itemData(idx).toInt() == static_cast<int>(MftskTier::SPORT)) {
@@ -97,25 +72,13 @@ void SettingsDialog::setupUI()
                     QStringLiteral("高速档 (M-FSK 150 符号/s) 吞吐更高，但对噪声/干扰更敏感，\n"
                                    "在较差链路上更容易出错。建议仅在信道质量良好时使用。"));
             }
+            saveSettings();
         });
 
-    spinMarkFreq_ = new QSpinBox(this);
-    spinMarkFreq_->setRange(300, 8000);
-    spinMarkFreq_->setValue(1200);
-    spinMarkFreq_->setSuffix(QStringLiteral(" Hz"));
-    modemLayout->addRow(QStringLiteral("Mark 频率:"), spinMarkFreq_);
-
-    spinSpaceFreq_ = new QSpinBox(this);
-    spinSpaceFreq_->setRange(300, 8000);
-    spinSpaceFreq_->setValue(2200);
-    spinSpaceFreq_->setSuffix(QStringLiteral(" Hz"));
-    modemLayout->addRow(QStringLiteral("Space 频率:"), spinSpaceFreq_);
-
-    spinBaudRate_ = new QSpinBox(this);
-    spinBaudRate_->setRange(100, 9600);
-    spinBaudRate_->setValue(1200);
-    spinBaudRate_->setSuffix(QStringLiteral(" bps"));
-    modemLayout->addRow(QStringLiteral("波特率:"), spinBaudRate_);
+    // 调制方式、自动检测变更时即时保存
+    connect(comboModem_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(checkAutoDetect_, &QCheckBox::toggled, this, &SettingsDialog::saveSettings);
 
     mainLayout->addWidget(modemGroup);
 
@@ -123,34 +86,76 @@ void SettingsDialog::setupUI()
     QGroupBox* fecGroup = new QGroupBox(QStringLiteral("纠错编码"), this);
     QFormLayout* fecLayout = new QFormLayout(fecGroup);
 
-    comboFEC_ = new QComboBox(this);
+    comboFEC_ = new QComboBox(fecGroup);
     comboFEC_->addItem(QStringLiteral("None"), 0);
     comboFEC_->addItem(QStringLiteral("Hamming"), 1);
     comboFEC_->addItem(QStringLiteral("Reed-Solomon"), 2);
-    // 默认 Hamming：真实声学链路（扬声器→麦克风、磁带机）存在符号
-    // 级错误，无纠错（None）时任意 1 位错误都会使 CRC 失败整帧作废；
-    // Hamming(7,4) 能纠正单符号错误。
     comboFEC_->setCurrentIndex(1);
     fecLayout->addRow(QStringLiteral("FEC 类型:"), comboFEC_);
+    connect(comboFEC_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
 
     mainLayout->addWidget(fecGroup);
 
-    // --- Buttons ---
-    buttonBox_ = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    connect(buttonBox_, &QDialogButtonBox::accepted, this, [this]() {
-        saveSettings();
-        accept();
-    });
-    connect(buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    mainLayout->addWidget(buttonBox_);
+    // --- Advanced / collapsible ---
+    advancedGroup_ = new QGroupBox(QStringLiteral("高级设置"), this);
+    advancedGroup_->setCheckable(true);
+    advancedGroup_->setChecked(false);  // collapsed by default
+    QFormLayout* advLayout = new QFormLayout(advancedGroup_);
+
+    comboSampleRate_ = new QComboBox(advancedGroup_);
+    comboSampleRate_->addItem(QStringLiteral("22050"), 22050);
+    comboSampleRate_->addItem(QStringLiteral("44100"), 44100);
+    comboSampleRate_->addItem(QStringLiteral("48000"), 48000);
+    comboSampleRate_->setCurrentIndex(1);
+    advLayout->addRow(QStringLiteral("采样率:"), comboSampleRate_);
+
+    comboBufferSize_ = new QComboBox(advancedGroup_);
+    comboBufferSize_->addItem(QStringLiteral("256"), 256);
+    comboBufferSize_->addItem(QStringLiteral("512"), 512);
+    comboBufferSize_->addItem(QStringLiteral("1024"), 1024);
+    comboBufferSize_->addItem(QStringLiteral("2048"), 2048);
+    comboBufferSize_->addItem(QStringLiteral("4096"), 4096);
+    comboBufferSize_->setCurrentIndex(2); // 1024 default
+    advLayout->addRow(QStringLiteral("缓冲区大小:"), comboBufferSize_);
+
+    spinMarkFreq_ = new QSpinBox(advancedGroup_);
+    spinMarkFreq_->setRange(300, 8000);
+    spinMarkFreq_->setValue(1200);
+    spinMarkFreq_->setSuffix(QStringLiteral(" Hz"));
+    advLayout->addRow(QStringLiteral("Mark 频率:"), spinMarkFreq_);
+
+    spinSpaceFreq_ = new QSpinBox(advancedGroup_);
+    spinSpaceFreq_->setRange(300, 8000);
+    spinSpaceFreq_->setValue(2200);
+    spinSpaceFreq_->setSuffix(QStringLiteral(" Hz"));
+    advLayout->addRow(QStringLiteral("Space 频率:"), spinSpaceFreq_);
+
+    spinBaudRate_ = new QSpinBox(advancedGroup_);
+    spinBaudRate_->setRange(100, 9600);
+    spinBaudRate_->setValue(1200);
+    spinBaudRate_->setSuffix(QStringLiteral(" bps"));
+    advLayout->addRow(QStringLiteral("波特率:"), spinBaudRate_);
+
+    connect(comboSampleRate_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(comboBufferSize_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(spinMarkFreq_, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(spinSpaceFreq_, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(spinBaudRate_, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SettingsDialog::saveSettings);
+
+    mainLayout->addWidget(advancedGroup_);
+    mainLayout->addStretch();
 }
 
-void SettingsDialog::showEvent(QShowEvent* event)
+void SettingsDialog::ensureDevicesLoaded()
 {
-    QDialog::showEvent(event);
-    // Defer device enumeration until the dialog is actually shown
-    // (avoids startup crash in QAudioDeviceInfo::availableDevices())
+    // Defer device enumeration until the panel is actually visible
+    // (avoids startup crash in QAudioDeviceInfo::availableDevices()).
     if (!devicesLoaded_) {
         populateDevices();
     }
