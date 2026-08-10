@@ -1,110 +1,119 @@
 # AudioT
 
-AudioT is an open-source Software-Defined Radio (SDR) application that transmits and receives data via audio signals. It supports multiple modulation schemes, error correction coding, and provides full SSTV (Slow Scan Television) image transmission functionality.
+AudioT is an audio-based data communication application: it encodes **text / files** into audio signals that can be carried through **tape recorders, broadcast radios**, and similar channels (a floor-noise recording can be used to auto-tune noise suppression for microphone hum and mains interference), and it provides full **SSTV (Slow Scan Television)** image transmit/receive. Both real-time and WAV-file modes are supported.
 
 ## Features
 
 ### Data Transmission
-- **Multiple Modems**: AFSK (default), PSK, QAM
-- **Forward Error Correction (FEC)**:
-  - Hamming(7,4) - Default link error correction
-  - Reed-Solomon - Block-level error correction
-  - LDPC - Experimental error correction
-- **Encoding Support**:
-  - Text encoding (TextCodec)
-  - File encoding (FileCodec)
-  - Image encoding (ImageCodec)
-  - Video encoding (VideoCodec)
+- **Modulation (only AFSK is wired in)**
+  - AFSK (1200/2200 Hz, Bell 202 style) — the default for both the TX/RX pipeline and the command line (currently the only modem connected to the pipeline)
+- **Forward Error Correction (FEC)** — three options:
+  - None
+  - Hamming(7,4) — default; corrects single-symbol errors, suited to real acoustic links
+  - Reed-Solomon — block-level correction; strongest in noisy channels
+- **Coding support**:
+  - Text (TextCodec)
+  - File (FileCodec)
+
+> Note: the source tree also contains PSK / QAM modem implementations and an LDPC FEC implementation, but they are **reserved code** not yet wired into the TX/RX pipeline or the UI, so they are not listed as supported features.
 
 ### SSTV Image Transmission
-Supports multiple SSTV modes, including:
-- Robot 36/72
-- Scottie S1/S2/DX
-- Martin M1/M2
-- PD50/PD120
+Supported SSTV modes:
+- Robot 36 / 72
+- Scottie S1 / S2 / DX
+- Martin M1 / M2
+- PD50 / PD120
 
 ### Audio Processing
-- Multiple audio backend support (Qt Multimedia, ALSA)
-- WAV file read/write
-- Noise filtering and reduction
+- Multiple audio backends (Qt Multimedia for Windows/macOS, ALSA for Linux)
+- WAV file read/write (encoded output / decoded input)
+- Floor-noise recording import and noise reduction (hum, mains, comb-notch filtering)
 
 ## Project Architecture
 
 ```
 AudioT/
-├── src/core/           # Core library (static library audioget_core)
+├── src/core/           # Core library (static lib audiot_core)
 │   ├── codec/          # Various codecs
 │   ├── dsp/            # Digital signal processing (FFT, filters, correlators)
-│   ├── fec/            # Forward error correction coding
-│   ├── modem/          # Modem implementation
+│   ├── fec/            # Forward error correction
+│   ├── modem/          # Modem implementations
 │   ├── noise/          # Noise processing
-│   ├── pipeline/       # TX/RX Pipelines
-│   └── sstv/           # SSTV Codec
-├── src/audio/          # Audio layer (static library audioget_audio)
-├── src/ui/             # UI layer (static library audioget_ui)
-├── src/app/            # Command-line application
+│   ├── pipeline/       # TX/RX pipelines
+│   └── sstv/           # SSTV codec
+├── src/audio/          # Audio layer (static lib audiot_audio)
+├── src/ui/             # UI layer (static lib audiot_ui, Qt5)
+├── src/app/            # Application entry (GUI + CLI)
 ├── tests/              # Unit tests
 └── docs/               # Documentation
 ```
 
 ## Build Guide
 
-### Windows (MinGW)
+### Windows (MinGW + Qt)
 ```bash
-mkdir build && cd build
-cmake .. -G "MinGW Makefiles"
-cmake --build . --config Release
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
+```
+
+### Windows (MSVC / Visual Studio)
+```bash
+cmake -S . -B build -G "Visual Studio 18 2026"  # 32-bit: add -A win32
+cmake --build build
 ```
 
 ### Linux
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
+cmake -S . -B build
+cmake --build build
 ```
+
+> Requires Qt 5.15 (when found, the GUI and Qt auto-tools are enabled; otherwise only the core library and CLI are built). The executable is produced at `build/src/app/`.
 
 ## Usage
 
 ### Command Line Tool
-
 ```bash
-# Encode text to WAV file
-audiot --encode "Hello, World!" -o message.wav
+# Encode text to a WAV file
+AudioT encode "Hello, World!" message.wav
 
-# Decode WAV file
-audiot --decode input.wav -o output.txt
+# Decode a WAV file to text
+AudioT decode input.wav output.txt
 
-# Run tests
-audiot --test
+# Device self-test / version info
+AudioT devtest
+AudioT version
 ```
 
 ### GUI Application
-After launching, you can see the main interface, which includes:
-- **TX Panel**: Transmitter panel
-- **RX Panel**: Receiver panel
-- **SSTV Viewer**: Image preview
-- **Audio Monitor**: Audio monitor
+The main window includes:
+- **TX Panel**: transmitter (text / file, optional FEC, live play or export WAV)
+- **RX Panel**: receiver (live microphone decoding with noise suppression)
+- **SSTV Viewer**: image send/receive preview
+- **Audio Monitor**: audio monitor
 
 ## Testing
 
-The project includes comprehensive unit tests:
-- `test_afsk.cpp` - AFSK Modem tests
-- `test_fec.cpp` - Error correction coding tests
-- `test_pipeline.cpp` - Pipeline tests
-- `test_sstv.cpp` - SSTV tests
-- More test cases
+The project includes comprehensive unit tests (Catch2, in `tests/`):
+- `test_afsk.cpp` - AFSK modem
+- `test_fec.cpp` - error correction coding
+- `test_pipeline.cpp` - TX/RX pipeline
+- `test_sstv.cpp` - SSTV encode/decode
+- plus fft / filter / wav / tone / file_codec / reed_solomon, etc.
 
 Run tests:
 ```bash
-./build/tests/audiot_test
+ctest --test-dir build
+# or individually
+./build/tests/test_afsk.exe
 ```
 
 ## Dependencies
 
 - CMake 3.16+
-- Qt 5.15+ (Required for GUI)
-- C++17 compatible compiler
-- FFTW3 (Audio processing)
+- Qt 5.15 (required for GUI)
+- A C++11 compatible compiler
+- KissFFT (fetched automatically via FetchContent)
 
 ## Protocol Specifications
 
@@ -116,4 +125,4 @@ Issues and Pull Requests are welcome.
 
 ## License
 
-This project follows an open-source license agreement.
+This project is licensed under the [BSD-3-Clause](LICENSE) license.

@@ -23,6 +23,9 @@ tool/
 *.dll
 *.exe
 
+# 工具 / 工作区元数据
+.codewhale/
+
 # IDE / 编辑器
 .vscode/
 .idea/
