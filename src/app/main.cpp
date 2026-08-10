@@ -26,7 +26,7 @@
 #endif
 
 #ifndef AUDIOT_VERSION
-#define AUDIOT_VERSION "1.3.0"
+#define AUDIOT_VERSION "1.4.0"
 #endif
 
 #ifdef _WIN32
