@@ -277,7 +277,7 @@ void MainWindow::onSettings()
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, QStringLiteral("关于 AudioT"),
-        QStringLiteral("<h3>AudioT v1.2.0</h3>"
+        QStringLiteral("<h3>AudioT v1.3.0</h3>"
                        "<p>音频数据通信软件</p>"
                        "<p>支持 AFSK 调制，"
                        "Hamming/Reed-Solomon 纠错编码，"

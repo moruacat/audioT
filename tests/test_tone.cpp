@@ -97,7 +97,7 @@ TEST_CASE("makeTone: works at all supported pipeline sample rates", "[tone]") {
 
 TEST_CASE("PipelineConfig: prepToneSeconds default", "[pipeline]") {
     PipelineConfig cfg;
-    REQUIRE(cfg.prepToneSeconds == 5.0f);
+    REQUIRE(cfg.prepToneSeconds == 1.0f);
 }
 
 TEST_CASE("PipelineConfig: endControlSeconds default", "[pipeline]") {

@@ -24,7 +24,7 @@
 #endif
 
 #ifndef AUDIOT_VERSION
-#define AUDIOT_VERSION "1.2.0"
+#define AUDIOT_VERSION "1.3.0"
 #endif
 
 static void printUsage() {
