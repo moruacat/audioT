@@ -7,48 +7,68 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QMessageBox>
+#include <QLabel>
 
 namespace audiot {
 
+namespace {
+// Qt 5.15 MinGW 的 QFormLayout 没有 setRowVisible()，这里通过同时
+// 隐藏字段控件与其行标签实现"整行显隐"。
+void setFormRowVisible(QFormLayout* layout, QWidget* field, bool visible)
+{
+    if (!layout || !field) return;
+    field->setVisible(visible);
+    if (QWidget* label = layout->labelForField(field)) {
+        label->setVisible(visible);
+    }
+}
+} // namespace
+
 ModemSettingsWidget::ModemSettingsWidget(QWidget* parent)
     : QWidget(parent)
+    , layout_(nullptr)
+    , tierRow_(-1)
+    , autoDetectRow_(-1)
 {
     setupUI();
+    updateTierVisibility();
 }
 
 void ModemSettingsWidget::setupUI()
 {
     QGroupBox* modemGroup = new QGroupBox(QStringLiteral("调制参数"), this);
-    QFormLayout* layout = new QFormLayout(modemGroup);
-    layout->setContentsMargins(6, 6, 6, 6);
+    layout_ = new QFormLayout(modemGroup);
+    layout_->setContentsMargins(6, 6, 6, 6);
 
     comboModem_ = new QComboBox(modemGroup);
     comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
     comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
-    layout->addRow(QStringLiteral("调制方式:"), comboModem_);
+    layout_->addRow(QStringLiteral("调制方式:"), comboModem_);
 
     comboMftskTier_ = new QComboBox(modemGroup);
     comboMftskTier_->addItem(QStringLiteral("稳健 (50/s)"), static_cast<int>(MftskTier::ROBUST));
     comboMftskTier_->addItem(QStringLiteral("均衡 (100/s)"), static_cast<int>(MftskTier::BALANCED));
     comboMftskTier_->addItem(QStringLiteral("高速 (150/s)"), static_cast<int>(MftskTier::SPORT));
-    layout->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
+    tierRow_ = layout_->rowCount();
+    layout_->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
 
     checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式 (AFSK / M-FSK)"), modemGroup);
-    layout->addRow(QString(), checkAutoDetect_);
+    autoDetectRow_ = layout_->rowCount();
+    layout_->addRow(QString(), checkAutoDetect_);
 
     comboFEC_ = new QComboBox(modemGroup);
     comboFEC_->addItem(QStringLiteral("None"), 0);
     comboFEC_->addItem(QStringLiteral("Hamming"), 1);
     comboFEC_->addItem(QStringLiteral("Reed-Solomon"), 2);
     comboFEC_->setCurrentIndex(1);  // Hamming default
-    layout->addRow(QStringLiteral("FEC 类型:"), comboFEC_);
+    layout_->addRow(QStringLiteral("FEC 类型:"), comboFEC_);
 
-    // 高速档提示
+    // 高速档提示 + 档位可见性联动
     connect(comboMftskTier_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &ModemSettingsWidget::onMftskTierChanged);
-    // 任何变更都通知外部
+    // 调制方式切换：MFSK 档位行仅在选择 MFSK 时显示；任何变更都通知外部
     connect(comboModem_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-            this, &ModemSettingsWidget::changed);
+            this, &ModemSettingsWidget::onModemChanged);
     connect(comboFEC_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &ModemSettingsWidget::changed);
     connect(checkAutoDetect_, &QCheckBox::toggled, this, &ModemSettingsWidget::changed);
@@ -56,6 +76,26 @@ void ModemSettingsWidget::setupUI()
     QVBoxLayout* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(modemGroup);
+}
+
+void ModemSettingsWidget::onModemChanged(int index)
+{
+    updateTierVisibility();
+    emit changed();
+}
+
+void ModemSettingsWidget::updateTierVisibility()
+{
+    if (!layout_ || tierRow_ < 0) return;
+    const bool isMfsk =
+        (comboModem_->currentData().toInt() == static_cast<int>(ModemType::MFSK));
+    setFormRowVisible(layout_, comboMftskTier_, isMfsk);
+}
+
+void ModemSettingsWidget::setAutoDetectVisible(bool visible)
+{
+    if (!layout_ || autoDetectRow_ < 0) return;
+    setFormRowVisible(layout_, checkAutoDetect_, visible);
 }
 
 void ModemSettingsWidget::onMftskTierChanged(int index)

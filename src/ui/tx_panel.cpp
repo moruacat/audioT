@@ -80,6 +80,8 @@ void TxPanel::setupUI()
 
     // --- Configuration (per-surface modem settings) ---
     modemSettings_ = new ModemSettingsWidget(this);
+    // 发射端不需要"自动检测调制方式"（那是接收端能力）
+    modemSettings_->setAutoDetectVisible(false);
     mainLayout->addWidget(modemSettings_);
 
     // --- Output group ---
