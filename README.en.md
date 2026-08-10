@@ -15,7 +15,7 @@ AudioT is an audio-based data communication application: it encodes **text / fil
   - Text (TextCodec)
   - File (FileCodec)
 
-> Note: the source tree also contains PSK / QAM modem implementations and an LDPC FEC implementation, but they are **reserved code** not yet wired into the TX/RX pipeline or the UI, so they are not listed as supported features.
+> Note: the PSK / QAM modem implementations were moved out of the main source tree into [beta/](beta/) (experimental, untested); the LDPC FEC implementation is likewise not wired into the TX/RX pipeline, so none of them are listed as supported features.
 
 ### SSTV Image Transmission
 Supported SSTV modes:

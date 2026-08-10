@@ -67,9 +67,8 @@ void TxPanel::setupUI()
     QFormLayout* configLayout = new QFormLayout(configGroup);
 
     comboModem_ = new QComboBox(this);
+    // 仅 AFSK 已接入流水线；PSK/QAM 为实验代码，已移至 beta/ 归档。
     comboModem_->addItem(QStringLiteral("AFSK"));
-    comboModem_->addItem(QStringLiteral("PSK"));
-    comboModem_->addItem(QStringLiteral("QAM"));
     configLayout->addRow(QStringLiteral("调制方式:"), comboModem_);
 
     comboFEC_ = new QComboBox(this);

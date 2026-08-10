@@ -7,10 +7,11 @@
 namespace audiot {
 
 // Modulation mode enumeration
+// PSK/QAM implementations were moved to beta/ (not wired into the
+// TX/RX pipeline; experimental and untested), leaving AFSK as the only
+// active modulation.
 enum class ModemType {
-    AFSK,   // Audio Frequency Shift Keying
-    PSK,    // Phase Shift Keying
-    QAM     // Quadrature Amplitude Modulation
+    AFSK    // Audio Frequency Shift Keying
 };
 
 // Modem abstract interface: converts between bits and audio samples
