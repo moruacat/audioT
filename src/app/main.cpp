@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -11,6 +12,7 @@
 #include "pipeline/rx_pipeline.h"
 #include "pipeline/pipeline_config.h"
 #include "audio/wav_reader.h"
+#include "core/util/file_utils.h"
 
 #ifdef AUDIOT_HAS_QT
 #include "audio/audio_device.h"
@@ -25,6 +27,24 @@
 
 #ifndef AUDIOT_VERSION
 #define AUDIOT_VERSION "1.3.0"
+#endif
+
+#ifdef _WIN32
+// MinGW's CRT hands CLI args as the ANSI code page (GBK on Chinese
+// systems), while the rest of the app uses UTF-8 paths. Convert so
+// Chinese paths typed on the command line reach openFile() as UTF-8.
+static std::string ansiToUtf8(const char* s) {
+    if (!s) return std::string();
+    const int wlen = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (wlen <= 0) return std::string(s);
+    std::vector<wchar_t> wbuf(static_cast<size_t>(wlen));
+    MultiByteToWideChar(CP_ACP, 0, s, -1, wbuf.data(), wlen);
+    const int ulen = WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), -1, nullptr, 0, nullptr, nullptr);
+    if (ulen <= 0) return std::string(s);
+    std::vector<char> ubuf(static_cast<size_t>(ulen));
+    WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), -1, ubuf.data(), ulen, nullptr, nullptr);
+    return std::string(ubuf.data());
+}
 #endif
 
 static void printUsage() {
@@ -82,8 +102,8 @@ static int cmdDecode(const std::string& wavPath, const std::string& outPath) {
     if (result.type == audiot::DecodeResult::TEXT) {
         printf("Decoded text: \"%s\"\n", result.text.c_str());
 
-        // Write to output file
-        FILE* f = fopen(outPath.c_str(), "w");
+        // Write to output file (Unicode-safe: Chinese/non-ASCII paths)
+        FILE* f = audiot::openFile(outPath, "w");
         if (!f) {
             fprintf(stderr, "Error: Cannot open output file: %s\n", outPath.c_str());
             return 1;
@@ -94,8 +114,8 @@ static int cmdDecode(const std::string& wavPath, const std::string& outPath) {
         printf("Decoded file: \"%s\" (%zu bytes)\n",
                result.filename.c_str(), result.fileData.size());
 
-        // Write raw data to output file
-        FILE* f = fopen(outPath.c_str(), "wb");
+        // Write raw data to output file (Unicode-safe)
+        FILE* f = audiot::openFile(outPath, "wb");
         if (!f) {
             fprintf(stderr, "Error: Cannot open output file: %s\n", outPath.c_str());
             return 1;
@@ -272,7 +292,13 @@ int main(int argc, char* argv[]) {
             printUsage();
             return 1;
         }
+#ifdef _WIN32
+        // CRT argv is ANSI (GBK on Chinese systems); convert to UTF-8 so
+        // Chinese output paths work with openFile().
+        return cmdEncode(ansiToUtf8(argv[2]), ansiToUtf8(argv[3]));
+#else
         return cmdEncode(argv[2], argv[3]);
+#endif
     }
 
     if (cmd == "decode") {
@@ -281,7 +307,11 @@ int main(int argc, char* argv[]) {
             printUsage();
             return 1;
         }
+#ifdef _WIN32
+        return cmdDecode(ansiToUtf8(argv[2]), ansiToUtf8(argv[3]));
+#else
         return cmdDecode(argv[2], argv[3]);
+#endif
     }
 
     if (cmd == "test") {

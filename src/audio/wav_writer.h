@@ -1,11 +1,13 @@
-// wav_writer.h - WAV file writer (PCM 16-bit, standard C++ I/O)
+// wav_writer.h - WAV file writer (PCM 16/24-bit)
+// Uses the Unicode-safe openFile() helper so Chinese/non-ASCII paths
+// work on Windows (std::ofstream would fail on UTF-8 paths there).
 #ifndef AUDIOT_WAV_WRITER_H
 #define AUDIOT_WAV_WRITER_H
 
 #include <string>
 #include <vector>
-#include <fstream>
 #include <cstdint>
+#include <cstdio>
 #include "audio_format.h"
 
 namespace audiot {
@@ -15,7 +17,7 @@ public:
     WavWriter();
     ~WavWriter();
 
-    // Open a WAV file for writing with given format
+    // Open a WAV file for writing with given format (UTF-8 path accepted)
     bool open(const std::string& filename, const AudioFormat& format);
 
     // Close the file (writes final header)
@@ -41,7 +43,7 @@ private:
     // Write placeholder header at open time
     void writePlaceholderHeader();
 
-    std::ofstream file_;
+    FILE* file_;
     AudioFormat format_;
     size_t dataBytesWritten_;
     bool isOpen_;

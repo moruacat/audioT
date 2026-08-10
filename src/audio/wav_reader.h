@@ -1,11 +1,13 @@
-// wav_reader.h - WAV file reader (PCM 16/24-bit, standard C++ I/O)
+// wav_reader.h - WAV file reader (PCM 16/24-bit)
+// Uses the Unicode-safe openFile() helper so Chinese/non-ASCII paths
+// work on Windows (std::ifstream would fail on UTF-8 paths there).
 #ifndef AUDIOT_WAV_READER_H
 #define AUDIOT_WAV_READER_H
 
 #include <string>
 #include <vector>
-#include <fstream>
 #include <cstdint>
+#include <cstdio>
 #include "audio_format.h"
 
 namespace audiot {
@@ -15,7 +17,7 @@ public:
     WavReader();
     ~WavReader();
 
-    // Open a WAV file and parse its header
+    // Open a WAV file and parse its header (UTF-8 path accepted)
     bool open(const std::string& filename);
 
     // Close the file
@@ -38,13 +40,13 @@ public:
 
 private:
     // Read a little-endian value from stream
-    bool readU16LE(std::ifstream& f, uint16_t& val);
-    bool readU32LE(std::ifstream& f, uint32_t& val);
+    bool readU16LE(FILE* f, uint16_t& val);
+    bool readU32LE(FILE* f, uint32_t& val);
 
     // Read raw PCM samples and convert to float
     std::vector<float> readSamples(size_t maxFrames);
 
-    std::ifstream file_;
+    FILE* file_;
     AudioFormat format_;
     size_t dataOffset_;     // Byte offset of data chunk
     size_t dataSize_;       // Size of data chunk in bytes

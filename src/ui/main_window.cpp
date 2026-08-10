@@ -356,16 +356,8 @@ bool MainWindow::encodeTxInput(const QString& textOrFile, const PipelineConfig& 
 
     QString content = textOrFile;
     if (isFile) {
-        // 中文/非 ASCII 路径无法传输：Windows 下 FileCodec 通过
-        // std::ifstream 打开路径（要求 ANSI/ASCII），而 Qt 输入框的
-        // 中文路径会变成 UTF-8，导致文件打不开或打错。
-        for (QChar c : textOrFile) {
-            if (c.unicode() > 127) {
-                errorMsg = QStringLiteral("无法使用中文路径");
-                return false;
-            }
-        }
-        // 文件发送：仅检查可读性，内容由 FileCodec 直接读取打包
+        // 文件发送：仅检查可读性，内容由 FileCodec 直接读取打包。
+        // （中文/非 ASCII 路径已支持：底层改用宽字符打开文件。）
         QFile file(textOrFile);
         if (!file.open(QIODevice::ReadOnly)) {
             errorMsg = QStringLiteral("无法打开文件");
@@ -521,23 +513,7 @@ void MainWindow::onExportWav(const QString& textOrFile, const QString& path)
         bool isFile = textOrFile.contains(QStringLiteral(".")) &&
                       (textOrFile.contains(QStringLiteral("/")) || textOrFile.contains(QStringLiteral("\\")));
         if (isFile) {
-            // 中文/非 ASCII 路径无法传输：Windows 下 FileCodec 通过
-            // std::ifstream 打开路径（要求 ANSI/ASCII），而 Qt 输入框的
-            // 中文路径会变成 UTF-8，导致文件打不开或打错。
-            bool hasNonAscii = false;
-            for (QChar c : textOrFile) {
-                if (c.unicode() > 127) { hasNonAscii = true; break; }
-            }
-            if (hasNonAscii) {
-                QMetaObject::invokeMethod(
-                    this, [this, gen]() {
-                        if (gen != txExportGen_.load()) return;
-                        txPanel_->onTransmissionProgress(0);
-                        txPanel_->onTransmissionStatus(QStringLiteral("导出失败: 无法使用中文路径"));
-                        statusBar()->showMessage(QStringLiteral("导出 WAV 失败"), 5000);
-                    }, Qt::QueuedConnection);
-                return;
-            }
+            // 中文/非 ASCII 路径已支持（底层宽字符打开），仅检查可读性
             QFile file(textOrFile);
             if (!file.open(QIODevice::ReadOnly)) {
                 QMetaObject::invokeMethod(

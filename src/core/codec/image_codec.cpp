@@ -1,9 +1,9 @@
 // image_codec.cpp - Image frame codec implementation
 #include "image_codec.h"
 #include "file_codec.h"
+#include "util/file_utils.h"
 
 #include <cstring>
-#include <fstream>
 
 namespace audiot {
 
@@ -37,18 +37,23 @@ std::vector<uint8_t> ImageCodec::encodeImage(const std::string& filename,
 
 std::vector<uint8_t> ImageCodec::encodeFile(const std::string& filePath) {
     // Read the raw file bytes and wrap them as an IMAGE-typed frame.
-    std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
-    if (!ifs.is_open()) {
+    // Unicode-safe: Chinese/non-ASCII paths work.
+    FILE* f = openFile(filePath, "rb");
+    if (!f) {
         return std::vector<uint8_t>();
     }
 
-    const std::streamsize fileSize = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return std::vector<uint8_t>(); }
+    const long fileSize = ftell(f);
+    if (fileSize < 0) { fclose(f); return std::vector<uint8_t>(); }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return std::vector<uint8_t>(); }
 
     std::vector<uint8_t> data(static_cast<size_t>(fileSize));
     if (fileSize > 0) {
-        ifs.read(reinterpret_cast<char*>(data.data()), fileSize);
+        const size_t got = fread(data.data(), 1, static_cast<size_t>(fileSize), f);
+        data.resize(got);
     }
+    fclose(f);
 
     std::string filename = filePath;
     const size_t lastSlash = filePath.find_last_of("/\\");

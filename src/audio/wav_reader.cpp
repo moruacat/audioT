@@ -1,5 +1,6 @@
 // wav_reader.cpp - WAV file reader implementation
 #include "wav_reader.h"
+#include "util/file_utils.h"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -7,7 +8,7 @@
 namespace audiot {
 
 WavReader::WavReader()
-    : dataOffset_(0), dataSize_(0), totalFrames_(0), framesRead_(0)
+    : file_(nullptr), dataOffset_(0), dataSize_(0), totalFrames_(0), framesRead_(0)
 {
 }
 
@@ -15,16 +16,16 @@ WavReader::~WavReader() {
     close();
 }
 
-bool WavReader::readU16LE(std::ifstream& f, uint16_t& val) {
+bool WavReader::readU16LE(FILE* f, uint16_t& val) {
     uint8_t buf[2];
-    if (!f.read(reinterpret_cast<char*>(buf), 2)) return false;
+    if (fread(buf, 1, 2, f) != 2) return false;
     val = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
     return true;
 }
 
-bool WavReader::readU32LE(std::ifstream& f, uint32_t& val) {
+bool WavReader::readU32LE(FILE* f, uint32_t& val) {
     uint8_t buf[4];
-    if (!f.read(reinterpret_cast<char*>(buf), 4)) return false;
+    if (fread(buf, 1, 4, f) != 4) return false;
     val = static_cast<uint32_t>(buf[0])
         | (static_cast<uint32_t>(buf[1]) << 8)
         | (static_cast<uint32_t>(buf[2]) << 16)
@@ -35,26 +36,27 @@ bool WavReader::readU32LE(std::ifstream& f, uint32_t& val) {
 bool WavReader::open(const std::string& filename) {
     close();
 
-    file_.open(filename, std::ios::binary);
-    if (!file_.is_open()) return false;
+    file_ = openFile(filename, "rb");
+    if (!file_) return false;
 
     // --- RIFF header ---
     char riffId[4];
-    if (!file_.read(riffId, 4)) { close(); return false; }
+    if (fread(riffId, 1, 4, file_) != 4) { close(); return false; }
     if (std::memcmp(riffId, "RIFF", 4) != 0) { close(); return false; }
 
     uint32_t fileSize;
     if (!readU32LE(file_, fileSize)) { close(); return false; }
 
     char waveId[4];
-    if (!file_.read(waveId, 4)) { close(); return false; }
+    if (fread(waveId, 1, 4, file_) != 4) { close(); return false; }
     if (std::memcmp(waveId, "WAVE", 4) != 0) { close(); return false; }
 
     // --- Parse chunks ---
     // Get file size for bounds checking
-    file_.seekg(0, std::ios::end);
-    auto fileEndPos = file_.tellg();
-    file_.seekg(12, std::ios::beg); // back to start of chunks (after RIFF header)
+    if (fseek(file_, 0, SEEK_END) != 0) { close(); return false; }
+    long fileEndPos = ftell(file_);
+    if (fileEndPos < 0) { close(); return false; }
+    if (fseek(file_, 12, SEEK_SET) != 0) { close(); return false; } // after RIFF header
 
     bool foundFmt = false;
     bool foundData = false;
@@ -63,14 +65,14 @@ bool WavReader::open(const std::string& filename) {
         char chunkId[4];
         uint32_t chunkSize;
 
-        if (!file_.read(chunkId, 4)) break;
+        if (fread(chunkId, 1, 4, file_) != 4) break;
         if (!readU32LE(file_, chunkSize)) break;
 
         // Safety: verify chunk size doesn't exceed remaining file
-        auto currentPos = file_.tellg();
+        long currentPos = ftell(file_);
         if (currentPos < 0) { close(); return false; }
-        auto remaining = static_cast<uint64_t>(fileEndPos) - static_cast<uint64_t>(currentPos);
-        if (static_cast<uint64_t>(chunkSize) > remaining) {
+        long remaining = fileEndPos - currentPos;
+        if (static_cast<uint64_t>(chunkSize) > static_cast<uint64_t>(remaining)) {
             // Chunk truncated - only safe if this is the data chunk
             if (std::memcmp(chunkId, "data", 4) == 0 && foundFmt) {
                 chunkSize = static_cast<uint32_t>(remaining);
@@ -116,13 +118,15 @@ bool WavReader::open(const std::string& filename) {
 
             // Skip extra fmt bytes
             if (chunkSize > 16) {
-                file_.seekg(static_cast<std::streamoff>(chunkSize - 16), std::ios::cur);
+                if (fseek(file_, static_cast<long>(chunkSize - 16), SEEK_CUR) != 0) {
+                    close(); return false;
+                }
             }
             foundFmt = true;
 
         } else if (std::memcmp(chunkId, "data", 4) == 0) {
             if (!foundFmt) { close(); return false; }
-            dataOffset_ = static_cast<size_t>(file_.tellg());
+            dataOffset_ = static_cast<size_t>(ftell(file_));
             dataSize_ = chunkSize;
             size_t bytesPerFrame = format_.bytesPerFrame();
             if (bytesPerFrame > 0) {
@@ -133,12 +137,13 @@ bool WavReader::open(const std::string& filename) {
         } else {
             // Skip unknown chunk (WAV chunks are word-aligned)
             uint32_t skipBytes = chunkSize + (chunkSize & 1);
-            auto pos = file_.tellg();
-            if (pos >= 0 && static_cast<uint64_t>(skipBytes) > remaining) {
+            if (static_cast<uint64_t>(skipBytes) > static_cast<uint64_t>(remaining)) {
                 // Not enough data to skip, stop parsing
                 break;
             }
-            file_.seekg(static_cast<std::streamoff>(skipBytes), std::ios::cur);
+            if (fseek(file_, static_cast<long>(skipBytes), SEEK_CUR) != 0) {
+                break;
+            }
         }
     }
 
@@ -149,8 +154,9 @@ bool WavReader::open(const std::string& filename) {
 }
 
 void WavReader::close() {
-    if (file_.is_open()) {
-        file_.close();
+    if (file_) {
+        fclose(file_);
+        file_ = nullptr;
     }
     dataOffset_ = 0;
     dataSize_ = 0;
@@ -167,12 +173,14 @@ size_t WavReader::totalSamples() const {
 }
 
 bool WavReader::isOpen() const {
-    return file_.is_open();
+    return file_ != nullptr;
 }
 
 std::vector<float> WavReader::readAll() {
     // Seek to data start
-    file_.seekg(static_cast<std::streamoff>(dataOffset_));
+    if (fseek(file_, static_cast<long>(dataOffset_), SEEK_SET) != 0) {
+        return std::vector<float>();
+    }
     framesRead_ = 0;
     return readSamples(totalFrames_);
 }
@@ -185,7 +193,7 @@ std::vector<float> WavReader::read(size_t count) {
 
 std::vector<float> WavReader::readSamples(size_t maxFrames) {
     std::vector<float> result;
-    if (maxFrames == 0 || !file_.is_open()) return result;
+    if (maxFrames == 0 || !file_) return result;
 
     int bps = format_.bitsPerSample;
     int ch = format_.channels;
@@ -202,13 +210,10 @@ std::vector<float> WavReader::readSamples(size_t maxFrames) {
     // Read raw bytes - protect against truncated files
     size_t bytesToRead = maxFrames * bytesPerFrame;
     std::vector<uint8_t> raw(bytesToRead);
-    std::streamsize gcount = file_.read(
-        reinterpret_cast<char*>(raw.data()),
-        static_cast<std::streamsize>(bytesToRead)
-    ).gcount();
+    size_t gcount = fread(raw.data(), 1, bytesToRead, file_);
 
     if (gcount <= 0) return result;
-    size_t actuallyRead = static_cast<size_t>(gcount);
+    size_t actuallyRead = gcount;
 
     // Align to frame boundary - partial frames are discarded
     size_t framesRead = actuallyRead / bytesPerFrame;

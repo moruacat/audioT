@@ -1,12 +1,13 @@
 // wav_writer.cpp - WAV file writer implementation
 #include "wav_writer.h"
+#include "util/file_utils.h"
 #include <cmath>
 #include <cstring>
 
 namespace audiot {
 
 WavWriter::WavWriter()
-    : dataBytesWritten_(0), isOpen_(false)
+    : file_(nullptr), dataBytesWritten_(0), isOpen_(false)
 {
 }
 
@@ -19,7 +20,7 @@ void WavWriter::writeU16LE(uint16_t val) {
         static_cast<uint8_t>(val & 0xFF),
         static_cast<uint8_t>((val >> 8) & 0xFF)
     };
-    file_.write(reinterpret_cast<const char*>(buf), 2);
+    fwrite(buf, 1, 2, file_);
 }
 
 void WavWriter::writeU32LE(uint32_t val) {
@@ -29,14 +30,14 @@ void WavWriter::writeU32LE(uint32_t val) {
         static_cast<uint8_t>((val >> 16) & 0xFF),
         static_cast<uint8_t>((val >> 24) & 0xFF)
     };
-    file_.write(reinterpret_cast<const char*>(buf), 4);
+    fwrite(buf, 1, 4, file_);
 }
 
 bool WavWriter::open(const std::string& filename, const AudioFormat& format) {
     close();
 
-    file_.open(filename, std::ios::binary);
-    if (!file_.is_open()) return false;
+    file_ = openFile(filename, "wb");
+    if (!file_) return false;
 
     format_ = format;
     dataBytesWritten_ = 0;
@@ -50,12 +51,12 @@ bool WavWriter::open(const std::string& filename, const AudioFormat& format) {
 void WavWriter::writePlaceholderHeader() {
     // Write 44-byte WAV header with zeroed sizes
     // RIFF header
-    file_.write("RIFF", 4);
+    fwrite("RIFF", 1, 4, file_);
     writeU32LE(0);  // Placeholder for file size - 8
-    file_.write("WAVE", 4);
+    fwrite("WAVE", 1, 4, file_);
 
     // fmt chunk
-    file_.write("fmt ", 4);
+    fwrite("fmt ", 1, 4, file_);
     writeU32LE(16);  // Chunk size
     writeU16LE(1);   // PCM format
     writeU16LE(static_cast<uint16_t>(format_.channels));
@@ -68,7 +69,7 @@ void WavWriter::writePlaceholderHeader() {
     writeU16LE(static_cast<uint16_t>(format_.bitsPerSample));
 
     // data chunk header
-    file_.write("data", 4);
+    fwrite("data", 1, 4, file_);
     writeU32LE(0);  // Placeholder for data size
 }
 
@@ -76,10 +77,11 @@ void WavWriter::close() {
     if (!isOpen_) return;
 
     // Seek back to beginning and rewrite header with correct sizes
-    file_.seekp(0);
+    fseek(file_, 0, SEEK_SET);
     writeHeader();
 
-    file_.close();
+    fclose(file_);
+    file_ = nullptr;
     isOpen_ = false;
     dataBytesWritten_ = 0;
 }
@@ -89,12 +91,12 @@ void WavWriter::writeHeader() {
     uint32_t riffSize = dataSize + 36;  // 36 = 4(WAVE) + 24(fmt chunk) + 8(data header)
 
     // RIFF header
-    file_.write("RIFF", 4);
+    fwrite("RIFF", 1, 4, file_);
     writeU32LE(riffSize);
-    file_.write("WAVE", 4);
+    fwrite("WAVE", 1, 4, file_);
 
     // fmt chunk
-    file_.write("fmt ", 4);
+    fwrite("fmt ", 1, 4, file_);
     writeU32LE(16);
     writeU16LE(1);   // PCM
     writeU16LE(static_cast<uint16_t>(format_.channels));
@@ -107,7 +109,7 @@ void WavWriter::writeHeader() {
     writeU16LE(static_cast<uint16_t>(format_.bitsPerSample));
 
     // data chunk
-    file_.write("data", 4);
+    fwrite("data", 1, 4, file_);
     writeU32LE(dataSize);
 }
 
@@ -137,8 +139,7 @@ void WavWriter::write(const float* data, size_t count) {
                 buf[pos + 1] = static_cast<uint8_t>((pcm >> 8) & 0xFF);
             }
         }
-        file_.write(reinterpret_cast<const char*>(buf.data()),
-                    static_cast<std::streamsize>(buf.size()));
+        fwrite(buf.data(), 1, buf.size(), file_);
         dataBytesWritten_ += buf.size();
 
     } else if (bps == 24) {
@@ -157,8 +158,7 @@ void WavWriter::write(const float* data, size_t count) {
                 buf[pos + 2] = static_cast<uint8_t>((pcm >> 16) & 0xFF);
             }
         }
-        file_.write(reinterpret_cast<const char*>(buf.data()),
-                    static_cast<std::streamsize>(buf.size()));
+        fwrite(buf.data(), 1, buf.size(), file_);
         dataBytesWritten_ += buf.size();
     }
 }

@@ -1,6 +1,6 @@
 // file_codec.cpp - Generic file encoder/decoder implementation
 #include "file_codec.h"
-#include <fstream>
+#include "util/file_utils.h"
 #include <cstring>
 
 namespace audiot {
@@ -100,19 +100,23 @@ std::vector<uint8_t> FileCodec::encodeData(const std::string& filename,
 }
 
 std::vector<uint8_t> FileCodec::encodeFile(const std::string& filePath) {
-    // Read entire file
-    std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
-    if (!ifs.is_open()) {
+    // Read entire file (Unicode-safe: Chinese/non-ASCII paths work)
+    FILE* f = openFile(filePath, "rb");
+    if (!f) {
         return std::vector<uint8_t>(); // Empty on failure
     }
 
-    std::streamsize fileSize = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return std::vector<uint8_t>(); }
+    const long fileSize = ftell(f);
+    if (fileSize < 0) { fclose(f); return std::vector<uint8_t>(); }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return std::vector<uint8_t>(); }
 
     std::vector<uint8_t> data(static_cast<size_t>(fileSize));
     if (fileSize > 0) {
-        ifs.read(reinterpret_cast<char*>(data.data()), fileSize);
+        const size_t got = fread(data.data(), 1, static_cast<size_t>(fileSize), f);
+        data.resize(got);
     }
+    fclose(f);
 
     // Extract filename from path
     std::string filename = filePath;
@@ -173,17 +177,21 @@ std::vector<std::vector<uint8_t>> FileCodec::encodeFileChunked(
 
     std::vector<std::vector<uint8_t>> frames;
 
-    // Read entire file
-    std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
-    if (!ifs.is_open()) return frames;
+    // Read entire file (Unicode-safe: Chinese/non-ASCII paths work)
+    FILE* f = openFile(filePath, "rb");
+    if (!f) return frames;
 
-    std::streamsize fileSize = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return frames; }
+    const long fileSize = ftell(f);
+    if (fileSize < 0) { fclose(f); return frames; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return frames; }
 
     std::vector<uint8_t> data(static_cast<size_t>(fileSize));
     if (fileSize > 0) {
-        ifs.read(reinterpret_cast<char*>(data.data()), fileSize);
+        const size_t got = fread(data.data(), 1, static_cast<size_t>(fileSize), f);
+        data.resize(got);
     }
+    fclose(f);
 
     // Extract filename
     std::string filename = filePath;

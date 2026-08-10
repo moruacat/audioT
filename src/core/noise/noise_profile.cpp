@@ -2,8 +2,8 @@
 #include "noise_profile.h"
 #include "../dsp/fft_wrapper.h"
 #include "../dsp/window.h"
+#include "../util/file_utils.h"
 
-#include <fstream>
 #include <cmath>
 #include <cstring>
 #include <complex>
@@ -48,46 +48,48 @@ bool NoiseProfile::createFromAudio(const std::vector<float>& noiseSamples,
 bool NoiseProfile::saveToFile(const std::string& filePath) const {
     if (!isValid()) return false;
 
-    std::ofstream out(filePath, std::ios::binary);
-    if (!out.is_open()) return false;
+    FILE* out = openFile(filePath, "wb");
+    if (!out) return false;
 
-    out.write(kProfileMagic, 4);
+    fwrite(kProfileMagic, 1, 4, out);
     const uint32_t version = kProfileVersion;
     const int32_t rate = sampleRate_;
     const uint32_t count = static_cast<uint32_t>(samples_.size());
-    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
-    out.write(reinterpret_cast<const char*>(&rate), sizeof(rate));
-    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-    out.write(reinterpret_cast<const char*>(samples_.data()),
-              static_cast<std::streamsize>(samples_.size() * sizeof(float)));
-    return out.good();
+    fwrite(&version, sizeof(version), 1, out);
+    fwrite(&rate, sizeof(rate), 1, out);
+    fwrite(&count, sizeof(count), 1, out);
+    const size_t written = fwrite(samples_.data(), sizeof(float), samples_.size(), out);
+    const bool ok = (written == samples_.size());
+    fclose(out);
+    return ok;
 }
 
 bool NoiseProfile::loadFromFile(const std::string& filePath) {
-    std::ifstream in(filePath, std::ios::binary);
-    if (!in.is_open()) return false;
+    FILE* in = openFile(filePath, "rb");
+    if (!in) return false;
 
     char magic[4] = { 0, 0, 0, 0 };
-    in.read(magic, 4);
-    if (!in.good() || std::memcmp(magic, kProfileMagic, 4) != 0) {
+    if (fread(magic, 1, 4, in) != 4 || std::memcmp(magic, kProfileMagic, 4) != 0) {
+        fclose(in);
         return false;
     }
 
     uint32_t version = 0;
     int32_t rate = 0;
     uint32_t count = 0;
-    in.read(reinterpret_cast<char*>(&version), sizeof(version));
-    in.read(reinterpret_cast<char*>(&rate), sizeof(rate));
-    in.read(reinterpret_cast<char*>(&count), sizeof(count));
-    if (!in.good() || version != kProfileVersion || rate <= 0 ||
+    if (fread(&version, sizeof(version), 1, in) != 1 ||
+        fread(&rate, sizeof(rate), 1, in) != 1 ||
+        fread(&count, sizeof(count), 1, in) != 1 ||
+        version != kProfileVersion || rate <= 0 ||
         count == 0 || count > (1u << 28)) {
+        fclose(in);
         return false;
     }
 
     std::vector<float> data(count);
-    in.read(reinterpret_cast<char*>(data.data()),
-            static_cast<std::streamsize>(count * sizeof(float)));
-    if (!in.good()) return false;
+    const size_t got = fread(data.data(), sizeof(float), count, in);
+    fclose(in);
+    if (got != count) return false;
 
     return createFromAudio(data, rate);
 }
