@@ -27,13 +27,16 @@ void TxPanel::setupUI()
     QHBoxLayout* modeLayout = new QHBoxLayout();
     radioText_ = new QRadioButton(QStringLiteral("文本输入"), this);
     radioFile_ = new QRadioButton(QStringLiteral("文件输入"), this);
+    radioImage_ = new QRadioButton(QStringLiteral("图片（SSTV）"), this);
     radioText_->setChecked(true);
 
     QButtonGroup* modeGroup = new QButtonGroup(this);
     modeGroup->addButton(radioText_);
     modeGroup->addButton(radioFile_);
+    modeGroup->addButton(radioImage_);
     modeLayout->addWidget(radioText_);
     modeLayout->addWidget(radioFile_);
+    modeLayout->addWidget(radioImage_);
     modeLayout->addStretch();
     inputLayout->addLayout(modeLayout);
 
@@ -131,7 +134,7 @@ void TxPanel::setupUI()
 
 void TxPanel::onModeChanged()
 {
-    bool textMode = radioText_->isChecked();
+    const bool textMode = radioText_->isChecked();
     textInput_->setVisible(textMode);
     filePathEdit_->setVisible(!textMode);
     btnBrowse_->setVisible(!textMode);
@@ -139,8 +142,12 @@ void TxPanel::onModeChanged()
 
 void TxPanel::onBrowseInput()
 {
+    // 图片模式：过滤图片文件；文本/文件模式：所有文件
+    const QString filter = radioImage_->isChecked()
+        ? QStringLiteral("图片文件 (*.png *.jpg *.jpeg *.bmp)")
+        : QStringLiteral("所有文件 (*)");
     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择输入文件"),
-                                                 QString(), QStringLiteral("所有文件 (*)"));
+                                                 QString(), filter);
     if (!path.isEmpty()) {
         filePathEdit_->setText(path);
     }
@@ -205,6 +212,9 @@ void TxPanel::onStartClicked()
 
     btnStart_->setEnabled(false);
     btnStop_->setEnabled(true);
+    radioText_->setEnabled(false);
+    radioFile_->setEnabled(false);
+    radioImage_->setEnabled(false);
     progress_->setValue(0);
     labelStatus_->setText(QStringLiteral("发射中..."));
 }
@@ -228,6 +238,9 @@ void TxPanel::onTransmissionStatus(const QString& status)
     if (status.contains(QStringLiteral("完成")) || status.contains(QStringLiteral("失败"))) {
         btnStart_->setEnabled(true);
         btnStop_->setEnabled(false);
+        radioText_->setEnabled(true);
+        radioFile_->setEnabled(true);
+        radioImage_->setEnabled(true);
     }
 }
 

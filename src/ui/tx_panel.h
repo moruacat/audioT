@@ -42,6 +42,7 @@ private:
     // Input mode
     QRadioButton* radioText_;
     QRadioButton* radioFile_;
+    QRadioButton* radioImage_;   // 图片（SSTV）模式
     QTextEdit* textInput_;
     QLineEdit* filePathEdit_;
     QPushButton* btnBrowse_;
