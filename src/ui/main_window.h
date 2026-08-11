@@ -13,7 +13,6 @@
 
 #include "core/pipeline/pipeline_config.h"
 #include "core/pipeline/rx_pipeline.h"
-#include "core/sstv/sstv_decoder.h"
 #include "audio/audio_device.h"
 #include "audio/qt_audio_stream.h"
 
@@ -40,9 +39,6 @@ private slots:
     void onExportWav(const QString& textOrFile, const QString& path);
     void onStartReceiving(const QString& wavPath);
     void onStopReceiving();
-    // SSTV 图片接收：空路径表示麦克风实时监听，非空为 WAV 文件解析
-    void onStartSstv(const QString& wavPath);
-    void onStopSstv();
     void onTxPlaybackTick();
     void onWavParseFinished(const DecodeResult& result);
 
@@ -86,23 +82,7 @@ private:
     // 停止麦克风监听并回收段解码线程（幂等）
     void stopRxMicListening();
 
-    // SSTV 图片接收：麦克风监听（头部检测 + 整帧累积）、WAV 文件
-    // 后台解码、结果上屏/自动保存/自动停止
-    void accumulateSstvMic(const float* samples, int count);
-    void submitSstvDecode(std::vector<float>& frame);
-    void onSstvParseFinished(const SSTVDecoder::DecodeResult& result);
-    void presentSstvResult(const SSTVDecoder::DecodeResult& result);
-    // 停止 SSTV 监听并回收解码线程（幂等）
-    void stopSstvListening();
-
-    // 读取图片并编码为 SSTV 音频（Martin M1，含帧尾静音），供
-    // 发射与 WAV 导出共用；失败时返回 false 并设置 errorMsg
-    bool encodeSstvImage(const QString& imagePath, int sampleRate,
-                         std::vector<float>& outSamples, QString& errorMsg);
-
     // Real-time TX playback orchestration (prep tone + modulated data)
-    // withPrepTone=false 用于 SSTV 发射：SSTV 信号自带 Leader/VIS 头，
-    // 无需 AFSK 准备音
     bool beginTxPlayback(const std::vector<float>& dataSamples,
                          bool withPrepTone = true);
     void finishTxPlayback(bool aborted);
@@ -155,16 +135,6 @@ private:
     std::thread* rxMicParseThread_;         // 段解码线程（结果回 UI）
     std::atomic<bool> rxMicAborted_;        // 监听停止后丢弃过期解析结果
     std::atomic<int> rxMicParseGen_;        // 区分新旧段解码回调
-
-    // 接收面板 SSTV 图片模式状态（与电台/麦克风监听互斥）
-    bool sstvListening_;                    // SSTV 麦克风监听中
-    std::vector<float> sstvMicBuffer_;      // 头部检测 + 整帧累积缓冲
-    bool sstvHeaderFound_;                  // 已检测到 SSTV 头部
-    size_t sstvNeedSamples_;                // 完整帧所需样本数
-    int sstvDetectCounter_;                 // 降低头部检测频率（防 UI 卡顿）
-    std::thread* sstvParseThread_;          // 解码线程（结果回 UI）
-    std::atomic<bool> sstvAborted_;         // 停止后丢弃过期解码结果
-    std::atomic<int> sstvParseGen_;         // 区分新旧解码回调
 
     // RX WAV 后台解析：长音频不阻塞 UI，停止时丢弃结果
     std::thread* rxParseThread_;

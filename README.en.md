@@ -1,6 +1,6 @@
 # AudioT
 
-AudioT is an audio-based data communication application: it encodes **text / files** into audio signals that can be carried through **tape recorders, broadcast radios**, and similar channels (a floor-noise recording can be used to auto-tune noise suppression for microphone hum and mains interference), and it provides full **SSTV (Slow Scan Television)** image transmit/receive. Both real-time and WAV-file modes are supported.
+AudioT is an audio-based data communication application: it encodes **text / files** into audio signals that can be carried through **tape recorders, broadcast radios**, and similar channels (a floor-noise recording can be used to auto-tune noise suppression for microphone hum and mains interference). Both real-time and WAV-file modes are supported.
 
 ## Features
 
@@ -29,13 +29,6 @@ AudioT is an audio-based data communication application: it encodes **text / fil
 
 > Note: the PSK / QAM modem implementations were moved out of the main source tree into [beta/](beta/) (experimental, untested); the LDPC FEC implementation is likewise not wired into the TX/RX pipeline, so none of them are listed as supported features.
 
-### SSTV Image Transmission
-Supported SSTV modes:
-- Robot 36 / 72
-- Scottie S1 / S2 / DX
-- Martin M1 / M2
-- PD50 / PD120
-
 ### Audio Processing
 - Multiple audio backends (Qt Multimedia for Windows/macOS, ALSA for Linux)
 - WAV file read/write (encoded output / decoded input)
@@ -51,8 +44,7 @@ AudioT/
 │   ├── fec/            # Forward error correction
 │   ├── modem/          # Modem implementations
 │   ├── noise/          # Noise processing
-│   ├── pipeline/       # TX/RX pipelines
-│   └── sstv/           # SSTV codec
+│   └── pipeline/       # TX/RX pipelines
 ├── src/audio/          # Audio layer (static lib audiot_audio)
 ├── src/ui/             # UI layer (static lib audiot_ui, Qt5)
 ├── src/app/            # Application entry (GUI + CLI)
@@ -101,7 +93,7 @@ AudioT version
 The main window includes:
 - **TX Panel**: transmitter (text / file, optional FEC, live play or export WAV)
 - **RX Panel**: receiver (live microphone decoding with noise suppression)
-- **SSTV Viewer**: image send/receive preview
+- **Radio Panel**: radio-mode transceiver interface
 - **Audio Monitor**: audio monitor
 
 ## Testing
@@ -109,8 +101,8 @@ The main window includes:
 The project includes comprehensive unit tests (Catch2, in `tests/`):
 - `test_afsk.cpp` - AFSK modem
 - `test_fec.cpp` - error correction coding
+- `test_mftsk.cpp` - MFSK modem
 - `test_pipeline.cpp` - TX/RX pipeline
-- `test_sstv.cpp` - SSTV encode/decode
 - plus fft / filter / wav / tone / file_codec / reed_solomon, etc.
 
 Run tests:

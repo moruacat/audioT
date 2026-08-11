@@ -121,7 +121,6 @@ PSK 与 QAM 调制器实现均为**未经验证的实验代码**，已从主源�
 |------|----------|
 | AFSK 文本链路（TxPipeline） | Hamming(7,4)，`PipelineConfig.useFEC = true` |
 | 文件/图像传输 | FileCodec CRC32 + 可选 RS(t=8) |
-| SSTV | 无 FEC（依赖模拟 FM 容噪，图像可降级接收） |
 
 ## 4. 音频格式约定
 

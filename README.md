@@ -1,6 +1,6 @@
 # AudioT
 
-AudioT 是一个基于音频信号的数据收发软件：它将**文本 / 文件**编码为音频，可通过**磁带机、广播电台**等途径进行数据传输（传输前可用底噪录音自动调参以抑制麦克风电流声与交流电干扰），并提供完整的 **SSTV（慢扫描电视）图像收发**能力。实时模式与 WAV 文件模式均可。
+AudioT 是一个基于音频信号的数据收发软件：它将**文本 / 文件**编码为音频，可通过**磁带机、广播电台**等途径进行数据传输（传输前可用底噪录音自动调参以抑制麦克风电流声与交流电干扰）。实时模式与 WAV 文件模式均可。
 
 ## 功能特性
 
@@ -23,13 +23,6 @@ AudioT 是一个基于音频信号的数据收发软件：它将**文本 / 文�
 
 > 说明：PSK、QAM 调制器实现已从主源码移除，归档至 [beta/](beta/)（实验性、未经实测）；LDPC 纠错实现同样未接入流水线，故均不列为已支持功能。
 
-### SSTV 图像传输
-支持的 SSTV 模式：
-- Robot 36 / 72
-- Scottie S1 / S2 / DX
-- Martin M1 / M2
-- PD50 / PD120
-
 ### 音频处理
 - 多种音频后端支持（Qt Multimedia for Windows/macOS、ALSA for Linux）
 - WAV 文件读写（编码输出 / 解码输入）
@@ -45,8 +38,7 @@ AudioT/
 │   ├── fec/            # 前向纠错编码
 │   ├── modem/          # 调制解调器实现
 │   ├── noise/          # 噪声处理
-│   ├── pipeline/       # TX/RX 管道
-│   └── sstv/           # SSTV 编解码
+│   └── pipeline/       # TX/RX 管道
 ├── src/audio/          # 音频层（静态库 audiot_audio）
 ├── src/ui/             # UI 层（静态库 audiot_ui，Qt5）
 ├── src/app/            # 应用入口（GUI + 命令行）
@@ -95,7 +87,7 @@ AudioT version
 启动后主界面包含：
 - **TX Panel**：发送数据面板（文本 / 文件，可选 FEC，实时播放或导出 WAV）
 - **RX Panel**：接收数据面板（麦克风实时解析，带底噪抑制）
-- **SSTV Viewer**：图像收发预览
+- **Radio Panel**：电台模式收发界面
 - **Audio Monitor**：音频监视器
 
 ## 测试
@@ -103,8 +95,8 @@ AudioT version
 项目包含完整的单元测试（Catch2，位于 `tests/`）：
 - `test_afsk.cpp` - AFSK 调制解调器
 - `test_fec.cpp` - 纠错编码
+- `test_mftsk.cpp` - MFSK 调制解调器
 - `test_pipeline.cpp` - TX/RX 管道
-- `test_sstv.cpp` - SSTV 编解码
 - 以及 fft / filter / wav / tone / file_codec / reed_solomon 等
 
 运行测试：

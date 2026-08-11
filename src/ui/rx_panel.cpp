@@ -1,6 +1,5 @@
 // rx_panel.cpp - Receive panel widget implementation
 #include "rx_panel.h"
-#include "sstv_viewer.h"
 #include "modem_settings_widget.h"
 
 #include <QVBoxLayout>
@@ -42,19 +41,17 @@ void RxPanel::setupUI()
     QGroupBox* sourceGroup = new QGroupBox(QStringLiteral("输入源"), this);
     QVBoxLayout* sourceLayout = new QVBoxLayout(sourceGroup);
 
-    // 模式选择：WAV 文件解析 / 麦克风实时监听 / SSTV 图片
+    // 模式选择：WAV 文件解析 / 麦克风实时监听
     QHBoxLayout* modeLayout = new QHBoxLayout();
     radioWav_ = new QRadioButton(QStringLiteral("WAV 文件"), this);
     radioMic_ = new QRadioButton(QStringLiteral("麦克风（实时）"), this);
-    radioSstv_ = new QRadioButton(QStringLiteral("SSTV 图片"), this);
     radioWav_->setChecked(true);
     modeLayout->addWidget(radioWav_);
     modeLayout->addWidget(radioMic_);
-    modeLayout->addWidget(radioSstv_);
     modeLayout->addStretch();
     sourceLayout->addLayout(modeLayout);
 
-    // WAV file row（WAV 解析与 SSTV 模式共用）
+    // WAV file row（WAV 解析模式使用）
     QHBoxLayout* wavLayout = new QHBoxLayout();
     wavFilePath_ = new QLineEdit(this);
     wavFilePath_->setPlaceholderText(QStringLiteral("选择 WAV 文件..."));
@@ -66,7 +63,7 @@ void RxPanel::setupUI()
 
     mainLayout->addWidget(sourceGroup);
 
-    // --- Received data group（文本页 / SSTV 图片页 切换显示）---
+    // --- Received data group（解码文本显示 + 保存）---
     QGroupBox* recvGroup = new QGroupBox(QStringLiteral("接收数据"), this);
     QVBoxLayout* recvLayout = new QVBoxLayout(recvGroup);
 
@@ -89,16 +86,6 @@ void RxPanel::setupUI()
     saveLayout->addWidget(btnSave);
     textPageLayout->addLayout(saveLayout);
     recvStack_->addWidget(textPage);
-
-    // SSTV 页：图片显示 + 保存图片按钮
-    QWidget* sstvPage = new QWidget(this);
-    QVBoxLayout* sstvPageLayout = new QVBoxLayout(sstvPage);
-    sstvPageLayout->setContentsMargins(0, 0, 0, 0);
-    sstvViewer_ = new SSTVViewer(sstvPage);
-    btnSaveSstv_ = new QPushButton(QStringLiteral("保存图片..."), sstvPage);
-    sstvPageLayout->addWidget(sstvViewer_);
-    sstvPageLayout->addWidget(btnSaveSstv_, 0, Qt::AlignRight);
-    recvStack_->addWidget(sstvPage);
 
     recvLayout->addWidget(recvStack_);
 
@@ -133,15 +120,18 @@ void RxPanel::setupUI()
     connect(btnStart_, &QPushButton::clicked, this, &RxPanel::onStartClicked);
     connect(btnStop_, &QPushButton::clicked, this, &RxPanel::onStopClicked);
     connect(radioWav_, &QRadioButton::toggled, this, &RxPanel::onModeChanged);
+    connect(radioMic_, &QRadioButton::toggled, this, &RxPanel::onModeChanged);
     connect(btnSave, &QPushButton::clicked, this, [this]() {
         QString path = savePath_->text().trimmed();
         if (path.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请输入保存路径"));
+            QMessageBox::warning(this, QStringLiteral("提示"),
+                                 QStringLiteral("请输入保存路径"));
             return;
         }
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("无法打开文件: %1").arg(path));
+            QMessageBox::warning(this, QStringLiteral("错误"),
+                                 QStringLiteral("无法打开文件: %1").arg(path));
             return;
         }
         QTextStream out(&file);
@@ -149,39 +139,30 @@ void RxPanel::setupUI()
         file.close();
         labelStatus_->setText(QStringLiteral("已保存到: %1").arg(path));
     });
-    // SSTV 图片另存为
-    connect(btnSaveSstv_, &QPushButton::clicked, this, [this]() {
-        QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存 SSTV 图片"),
-                                                     QString(), QStringLiteral("图片文件 (*.png *.jpg *.bmp)"));
-        if (path.isEmpty()) return;
-        if (sstvViewer_->saveImage(path)) {
-            labelStatus_->setText(QStringLiteral("已保存: %1").arg(path));
-        } else {
-            QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("无法保存图片"));
-        }
-    });
 }
 
 void RxPanel::onBrowseWav()
 {
-    QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择 WAV 文件"),
-                                                 QString(), QStringLiteral("WAV 文件 (*.wav)"));
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("选择 WAV 文件"), QString(),
+        QStringLiteral("WAV 音频 (*.wav)"));
     if (!path.isEmpty()) {
         wavFilePath_->setText(path);
     }
 }
 
+void RxPanel::clearReceived()
+{
+    receivedText_->clear();
+}
+
 void RxPanel::onModeChanged()
 {
     const bool wavMode = radioWav_->isChecked();
-    const bool sstvMode = radioSstv_->isChecked();
-    wavFilePath_->setVisible(wavMode || sstvMode);
-    btnBrowse_->setVisible(wavMode || sstvMode);
-    // 文本页 / SSTV 图片页切换
-    recvStack_->setCurrentIndex(sstvMode ? 1 : 0);
-    btnStart_->setText(sstvMode ? QStringLiteral("开始接收")
-                                : (wavMode ? QStringLiteral("开始解析")
-                                           : QStringLiteral("开始监听")));
+    wavFilePath_->setVisible(wavMode);
+    btnBrowse_->setVisible(wavMode);
+    btnStart_->setText(wavMode ? QStringLiteral("开始解析")
+                               : QStringLiteral("开始监听"));
     labelStatus_->setText(QStringLiteral("就绪"));
     progress_->setRange(0, 100);
     progress_->setValue(0);
@@ -189,22 +170,6 @@ void RxPanel::onModeChanged()
 
 void RxPanel::onStartClicked()
 {
-    if (radioSstv_->isChecked()) {
-        // SSTV 模式：文件行非空则解析 WAV 文件，为空则麦克风实时监听
-        const QString path = wavFilePath_->text().trimmed();
-        emit startSstv(path);
-        labelStatus_->setText(path.isEmpty()
-            ? QStringLiteral("SSTV 监听中...")
-            : QStringLiteral("SSTV 解析中..."));
-        progress_->setRange(0, path.isEmpty() ? 0 : 100);
-        btnStart_->setEnabled(false);
-        btnStop_->setEnabled(true);
-        radioWav_->setEnabled(false);
-        radioMic_->setEnabled(false);
-        radioSstv_->setEnabled(false);
-        return;
-    }
-
     if (radioMic_->isChecked()) {
         // 麦克风实时模式：空路径作为模式标记，MainWindow 据此启动监听
         emit startReceiving(QString());
@@ -214,13 +179,13 @@ void RxPanel::onStartClicked()
         btnStop_->setEnabled(true);
         radioWav_->setEnabled(false);
         radioMic_->setEnabled(false);
-        radioSstv_->setEnabled(false);
         return;
     }
 
     const QString path = wavFilePath_->text().trimmed();
     if (path.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请选择 WAV 文件"));
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("请选择 WAV 文件"));
         return;
     }
     // 解析在后台线程进行（MainWindow 负责），完成后经
@@ -232,26 +197,15 @@ void RxPanel::onStartClicked()
     btnStop_->setEnabled(true);
     radioWav_->setEnabled(false);
     radioMic_->setEnabled(false);
-    radioSstv_->setEnabled(false);
-}
-
-void RxPanel::clearReceived()
-{
-    receivedText_->clear();
 }
 
 void RxPanel::onStopClicked()
 {
-    if (radioSstv_->isChecked()) {
-        emit stopSstv();
-    } else {
-        emit stopReceiving();
-    }
+    emit stopReceiving();
     btnStart_->setEnabled(true);
     btnStop_->setEnabled(false);
     radioWav_->setEnabled(true);
     radioMic_->setEnabled(true);
-    radioSstv_->setEnabled(true);
     labelStatus_->setText(QStringLiteral("已停止"));
 }
 
@@ -279,25 +233,14 @@ void RxPanel::onReceiveProgress(int percent)
 void RxPanel::onReceiveStatus(const QString& status)
 {
     labelStatus_->setText(status);
-    if (status.contains(QStringLiteral("完成")) || status.contains(QStringLiteral("停止"))
-        || status.contains(QStringLiteral("错误"))) {
+    if (status.contains(QStringLiteral("完成")) ||
+        status.contains(QStringLiteral("停止")) ||
+        status.contains(QStringLiteral("错误"))) {
         btnStart_->setEnabled(true);
         btnStop_->setEnabled(false);
         radioWav_->setEnabled(true);
         radioMic_->setEnabled(true);
-        radioSstv_->setEnabled(true);
     }
-}
-
-void RxPanel::showSstvImage(const QImage& image)
-{
-    if (image.isNull()) return;
-    sstvViewer_->setImage(image.constBits(), image.width(), image.height());
-}
-
-void RxPanel::clearSstv()
-{
-    sstvViewer_->clearImage();
 }
 
 } // namespace audiot

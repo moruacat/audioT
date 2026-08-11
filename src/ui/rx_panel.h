@@ -12,11 +12,9 @@
 #include <QRadioButton>
 
 class QStackedWidget;
-class QImage;
 
 namespace audiot {
 
-class SSTVViewer;
 class ModemSettingsWidget;
 
 class RxPanel : public QWidget {
@@ -35,9 +33,6 @@ signals:
     void startReceiving(const QString& wavPath);
     // 中止正在进行的解析/监听
     void stopReceiving();
-    // SSTV 图片解析：空路径表示麦克风实时监听，非空为 WAV 文件
-    void startSstv(const QString& wavPath);
-    void stopSstv();
 
 public slots:
     void onDataReceived(const QString& text);
@@ -46,9 +41,6 @@ public slots:
     // percent >= 0 显示确定进度；-1 显示不确定（忙碌）状态
     void onReceiveProgress(int percent);
     void clearReceived();
-    // SSTV 解码图片上屏（拷贝显示）
-    void showSstvImage(const QImage& image);
-    void clearSstv();
 
 private slots:
     void onBrowseWav();
@@ -59,22 +51,19 @@ private slots:
 private:
     void setupUI();
 
-    // Input source（WAV 文件 / 麦克风实时 / SSTV 图片 三模式）
+    // Input source（WAV 文件 / 麦克风实时 两种模式）
     QRadioButton* radioWav_;
     QRadioButton* radioMic_;
-    QRadioButton* radioSstv_;
     QLineEdit* wavFilePath_;
     QPushButton* btnBrowse_;
 
     // Per-surface modem settings widget
     ModemSettingsWidget* modemSettings_;
 
-    // Output（文本页 / SSTV 图片页 切换显示）
+    // Output（解码文本显示 + 保存）
     QStackedWidget* recvStack_;
     QTextEdit* receivedText_;
     QLineEdit* savePath_;
-    SSTVViewer* sstvViewer_;
-    QPushButton* btnSaveSstv_;
 
     // Control
     QPushButton* btnStart_;
