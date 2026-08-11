@@ -16,7 +16,9 @@ namespace audiot {
 //   VIS data (7 bits LSB-first + even parity, 30 ms each,
 //             bit=1 -> 1100 Hz, bit=0 -> 1300 Hz)
 //   VIS stop (1200 Hz, 30 ms)
-//   Per line: sync pulse (1200 Hz) + pixel scan (1500..2300 Hz FM)
+//   Per line: sync pulse (1200 Hz), then a fixed number of color scan
+//   segments (standard SSTV: R-Y then B-Y then Y), each a full-width
+//   FM scan over 1500..2300 Hz mapping pixel value 0->1500, 255->2300.
 class SSTVEncoder {
 public:
     SSTVEncoder();

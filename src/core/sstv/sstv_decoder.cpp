@@ -231,35 +231,44 @@ SSTVDecoder::DetectionResult SSTVDecoder::detect(
 // Demodulate one scan line (FM 1500..2300 Hz) into per-pixel frequencies
 // using quadrature down-conversion + cascaded moving-average filters.
 // Returns one frequency estimate per pixel in outFreq.
+// pixelSamplesD is the per-pixel sample count (double), mirroring the
+// encoder's floating raster; the pixel grid is derived from it below.
 static bool demodScanLine(const std::vector<float>& samples, size_t scanStart,
-                          size_t scanLen, int width, size_t pixelSamples,
+                          size_t scanLen, int width, double pixelSamplesD,
                           int sampleRate, float blackFreq, float whiteFreq,
                           std::vector<float>& outFreq) {
     outFreq.assign(static_cast<size_t>(width), blackFreq);
     if (scanStart + scanLen > samples.size() || scanLen < 4 ||
-        pixelSamples == 0) {
+        pixelSamplesD < 0.5) {
         return false;
     }
 
     // Filter length per stage: ~3 pixels for strong 2*LO ripple rejection.
-    size_t W = pixelSamples * 3;
+    size_t W = static_cast<size_t>(pixelSamplesD * 3.0 + 0.5);
     if (W > scanLen) W = scanLen;
     if (W < 4) W = 4;
 
-    // Build padded segment: repeat the first/last pixel's tone samples so
-    // the filter stays centered and never sees the 1200 Hz sync pulse.
+    // Build padded segment: replicate the first/last pixel's tone samples
+    // so the filter stays centred and never sees the 1200 Hz sync pulse.
     // (Time reversal would mirror the frequency, so use repetition.)
-    const size_t padBlock = std::min(pixelSamples, scanLen);
+    // Head pad: repeat the first pixel's samples; tail pad: repeat the last
+    // pixel's samples. The repetition block is at least W samples long so
+    // the cascaded filter sees a continuous same-frequency tone (a tiny
+    // block would introduce spurious harmonics).
     std::vector<float> seg;
     seg.reserve(scanLen + 2 * W);
     for (size_t i = 0; i < W; ++i) {
-        seg.push_back(samples[scanStart + (i % padBlock)]);
+        seg.push_back(samples[scanStart + (i % W)]);
     }
     for (size_t i = 0; i < scanLen; ++i) {
         seg.push_back(samples[scanStart + i]);
     }
     for (size_t i = 0; i < W; ++i) {
-        seg.push_back(samples[scanStart + scanLen - padBlock + (i % padBlock)]);
+        if (scanLen > W) {
+            seg.push_back(samples[scanStart + scanLen - W + (i % W)]);
+        } else {
+            seg.push_back(samples[scanStart + i]);
+        }
     }
 
     const double fc = (static_cast<double>(blackFreq) + whiteFreq) / 2.0;
@@ -321,10 +330,13 @@ static bool demodScanLine(const std::vector<float>& samples, size_t scanStart,
         havePhase = true;
     }
 
-    // Sample at each pixel center (accounting for pad + group delay)
+    // Sample at each pixel center (accounting for pad + group delay).
+    // Use the same floating raster the encoder used (pixel boundaries at
+    // k * pixelSamplesD), so decoded pixels land exactly on their grid.
     for (int k = 0; k < width; ++k) {
+        const double kD = static_cast<double>(k);
         const double center =
-            static_cast<double>(W) + k * pixelSamples + pixelSamples / 2.0;
+            static_cast<double>(W) + (kD + 0.5) * pixelSamplesD;
         size_t n = static_cast<size_t>(center + delay + 0.5);
         if (n >= M) n = M - 1;
         outFreq[k] = freq[n];
@@ -347,12 +359,16 @@ SSTVDecoder::DecodeResult SSTVDecoder::decode(
         info.syncDurMs * 0.001 * sampleRate + 0.5);
     const double scanMs =
         static_cast<double>(info.lineTimeMs) - info.syncDurMs;
-    const double pixelMs = scanMs / w;
-    const size_t pixelSamples =
-        static_cast<size_t>(pixelMs * 0.001 * sampleRate + 0.5);
-    if (syncSamples == 0 || pixelSamples == 0) return result;
+    // Same component/pixel computation as the encoder so grids align
+    // exactly (floating raster positions, no cumulative round-off).
+    const int components = info.colorComponents;
+    const double pixelMs = scanMs / static_cast<double>(components) / w;
+    const double pixelSamplesD = pixelMs * 0.001 * sampleRate;
+    const double segSamplesD = pixelSamplesD * w;
+    if (syncSamples == 0 || segSamplesD < 1.0) return result;
 
-    const size_t lineSamples = syncSamples + static_cast<size_t>(w) * pixelSamples;
+    const size_t segSamples = static_cast<size_t>(segSamplesD + 0.5);
+    const size_t lineSamples = syncSamples + components * segSamples;
     if (det.imageStart + static_cast<size_t>(h) * lineSamples > samples.size()) {
         return result; // Not enough audio for a full frame
     }
@@ -360,25 +376,58 @@ SSTVDecoder::DecodeResult SSTVDecoder::decode(
     std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3, 0);
     const double span =
         static_cast<double>(info.whiteFreq) - info.blackFreq;
+    // Scratch buffers for one row's three colour components.
+    std::vector<float> compR(w), compB(w), compL(w);
+    // Per-pixel sample-start positions (mirrors encoder raster).
+    std::vector<size_t> pixStart(static_cast<size_t>(w));
+    {
+        double posD = 0.0;
+        for (int x = 0; x < w; ++x) {
+            const double nextD = (static_cast<double>(x) + 1.0) * pixelSamplesD;
+            pixStart[static_cast<size_t>(x)] = (nextD > posD)
+                                                   ? static_cast<size_t>(nextD)
+                                                   : static_cast<size_t>(posD) + 1;
+            posD = nextD;
+        }
+    }
 
     size_t linePos = det.imageStart;
     std::vector<float> pixelFreqs;
     for (int y = 0; y < h; ++y) {
-        const size_t scanStart = linePos + syncSamples;
-        const size_t scanLen = static_cast<size_t>(w) * pixelSamples;
-        demodScanLine(samples, scanStart, scanLen, w, pixelSamples, sampleRate,
-                     info.blackFreq, info.whiteFreq, pixelFreqs);
+        for (int comp = 0; comp < components; ++comp) {
+            const size_t scanStart = linePos + syncSamples + static_cast<size_t>(comp) * segSamples;
+            const size_t scanLen = segSamples;
+            demodScanLine(samples, scanStart, scanLen, w, pixelSamplesD, sampleRate,
+                         info.blackFreq, info.whiteFreq, pixelFreqs);
+            // Store the demodulated per-pixel values for this component.
+            for (int x = 0; x < w; ++x) {
+                double norm =
+                    (static_cast<double>(pixelFreqs[x]) - info.blackFreq) / span;
+                if (norm < 0.0) norm = 0.0;
+                if (norm > 1.0) norm = 1.0;
+                const uint8_t v = static_cast<uint8_t>(norm * 255.0 + 0.5);
+                if (comp == 2)      compL[x] = static_cast<float>(v);      // Y
+                else if (comp == 0) compR[x] = static_cast<float>(v);      // R-Y
+                else                compB[x] = static_cast<float>(v);      // B-Y
+            }
+        }
+        // Reconstruct RGB from (R-Y, B-Y, Y) (inverse of the encoder).
         for (int x = 0; x < w; ++x) {
-            double norm =
-                (static_cast<double>(pixelFreqs[x]) - info.blackFreq) / span;
-            if (norm < 0.0) norm = 0.0;
-            if (norm > 1.0) norm = 1.0;
-            const uint8_t lum = static_cast<uint8_t>(norm * 255.0 + 0.5);
-
+            const float Y = compL[x];
+            const float Ry = compR[x] - 128.0f;  // (R-Y) unscaled
+            const float By = compB[x] - 128.0f;  // (B-Y) unscaled
+            // Encoder scaled R-Y and B-Y by 0.5: recover the true offset.
+            int r = static_cast<int>(Y + 2.0f * Ry + 0.5f);
+            int g = static_cast<int>(Y - 0.344f * (2.0f * By) - 0.714f * (2.0f * Ry) + 0.5f);
+            int b = static_cast<int>(Y + 2.0f * By + 0.5f);
+            // Clamp.
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
             const size_t idx = (static_cast<size_t>(y) * w + x) * 3;
-            pixels[idx + 0] = lum;
-            pixels[idx + 1] = lum;
-            pixels[idx + 2] = lum;
+            pixels[idx + 0] = static_cast<uint8_t>(r);
+            pixels[idx + 1] = static_cast<uint8_t>(g);
+            pixels[idx + 2] = static_cast<uint8_t>(b);
         }
         linePos += lineSamples;
     }

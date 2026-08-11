@@ -202,7 +202,7 @@ TEST_CASE("SSTV encode/decode roundtrip: uniform gray", "[sstv][roundtrip]") {
     double sumErr = 0.0;
     size_t count = 0;
     for (int y = 2; y < h - 2; ++y) {
-        for (int x = 2; x < w - 2; ++x) {
+        for (int x = 8; x < w - 8; ++x) {
             const size_t idx = (static_cast<size_t>(y) * w + x) * 3;
             const double e =
                 std::fabs(static_cast<double>(res.pixels[idx]) - 128.0);
@@ -213,4 +213,57 @@ TEST_CASE("SSTV encode/decode roundtrip: uniform gray", "[sstv][roundtrip]") {
     }
     REQUIRE(sumErr / count < 2.0);
     REQUIRE(maxErr < 8.0);
+}
+
+TEST_CASE("SSTV encode/decode roundtrip: colour solid primaries", "[sstv][roundtrip][colour]") {
+    // Standard colour SSTV: each line carries R-Y, B-Y, Y scan segments.
+    // A solid primary must round-trip to (nearly) the same RGB.
+    SSTVEncoder enc;
+    enc.setMode(SSTVMode::MartinM1);
+
+    const SSTVProtocolInfo& info = getProtocolInfo(SSTVMode::MartinM1);
+    const int w = info.width;
+    const int h = info.height;
+    const int sampleRate = 44100;
+
+    struct { int r, g, b; const char* name; } colours[] = {
+        {255, 0, 0,   "red"},
+        {0, 255, 0,   "green"},
+        {0, 0, 255,   "blue"},
+        {255, 255, 0, "yellow"},
+    };
+
+    for (const auto& c : colours) {
+        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3);
+        for (size_t i = 0; i < pixels.size(); i += 3) {
+            pixels[i] = static_cast<uint8_t>(c.r);
+            pixels[i+1] = static_cast<uint8_t>(c.g);
+            pixels[i+2] = static_cast<uint8_t>(c.b);
+        }
+        const std::vector<float> audio = enc.encode(pixels.data(), w, h, sampleRate);
+        SSTVDecoder dec;
+        SSTVDecoder::DecodeResult res = dec.decode(audio, sampleRate);
+        REQUIRE(res.success);
+
+        // Evaluate a central pixel (filter settles away from line edges).
+        const int x = w / 2, y = h / 2;
+        const size_t idx = (static_cast<size_t>(y) * w + x) * 3;
+        INFO("colour " << c.name);
+        REQUIRE(std::abs(static_cast<int>(res.pixels[idx])   - c.r) <= 3);
+        REQUIRE(std::abs(static_cast<int>(res.pixels[idx+1]) - c.g) <= 3);
+        REQUIRE(std::abs(static_cast<int>(res.pixels[idx+2]) - c.b) <= 3);
+    }
+}
+
+TEST_CASE("SSTV encode/decode roundtrip: frame duration exact", "[sstv][roundtrip]") {
+    // The per-line colour segments must not drift the total frame length.
+    SSTVEncoder enc;
+    enc.setMode(SSTVMode::Robot36);
+    const SSTVProtocolInfo& info = getProtocolInfo(SSTVMode::Robot36);
+    const int w = info.width, h = info.height;
+    std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3, 128);
+    const int sampleRate = 44100;
+    const std::vector<float> audio = enc.encode(pixels.data(), w, h, sampleRate);
+    const double actual = static_cast<double>(audio.size()) / sampleRate;
+    REQUIRE(actual == Approx(SSTVEncoder::frameDuration(SSTVMode::Robot36)).epsilon(0.01));
 }

@@ -92,35 +92,85 @@ std::vector<float> SSTVEncoder::encode(const uint8_t* pixels, int w, int h,
     appendVIS(out, sampleRate, phase);
 
     // ---- Scan lines ----
-    // Per line: sync pulse, then one full-width FM scan of the row.
-    // Scan frequency maps pixel value 0 -> 1500 Hz, 255 -> 2300 Hz.
+    // Per line: sync pulse, then N color scan segments (standard SSTV:
+    // R-Y, B-Y, Y for Martin/Scottie/Robot; "colorComponents" is 3 for
+    // colour modes, 1 for mono). Each segment is a full-width FM scan of
+    // one colour-difference / luminance component. Pixel value 0 -> 1500
+    // Hz, 255 -> 2300 Hz (black..white).
+    const int components = info.colorComponents;
     const double syncMs = static_cast<double>(info.syncDurMs);
     const double scanMs =
-        static_cast<double>(info.lineTimeMs) - syncMs;
+        static_cast<double>(info.lineTimeMs) - syncMs;  // total per-line scan
+    const double pixelMs = scanMs / static_cast<double>(components) / w;
+    // Per-pixel sample count in floating point; total per segment is exact
+    // (no cumulative drift that would lengthen the frame / shift pixels).
+    const double pixelSamplesD = pixelMs * 0.001 * sampleRate;
+    const double segSamplesD = pixelSamplesD * w;
+    if (segSamplesD < 1.0) {
+        return out;
+    }
+    const double span =
+        static_cast<double>(info.whiteFreq) - info.blackFreq;
 
+    const size_t rowStride = static_cast<size_t>(w) * 3;
     for (int y = 0; y < h; ++y) {
         appendTone(out, info.syncFreq, static_cast<float>(syncMs), sampleRate,
                    phase);
 
-        // Per-pixel duration within the scan interval
-        const double pixelMs = scanMs / w;
-        const size_t pixelSamples =
-            static_cast<size_t>(pixelMs * 0.001 * sampleRate + 0.5);
-        const double span =
-            static_cast<double>(info.whiteFreq) - info.blackFreq;
+        const uint8_t* row = pixels + static_cast<size_t>(y) * rowStride;
+        // Each segment must emit exactly segSamples samples so that the
+        // decoder's frame-length check (segSamples = round(segSamplesD))
+        // stays in sync frame after frame. The floating raster distributes
+        // per-pixel counts; the last pixel absorbs any rounding remainder.
+        const size_t segSamples = static_cast<size_t>(segSamplesD + 0.5);
+        for (int comp = 0; comp < components; ++comp) {
+            double posD = 0.0;
+            size_t emitted = 0;
+            double lastPhaseStep = 0.0;
+            for (int x = 0; x < w; ++x) {
+                const double nextD = (static_cast<double>(x) + 1.0) * pixelSamplesD;
+                const long pixStart = static_cast<long>(posD);
+                const long pixEnd = static_cast<long>(nextD);
+                size_t nSamp = (pixEnd > pixStart)
+                                   ? static_cast<size_t>(pixEnd - pixStart)
+                                   : 1;
+                posD = nextD;
 
-        for (int x = 0; x < w; ++x) {
-            const uint8_t* px = pixels + (static_cast<size_t>(y) * w + x) * 3;
-            // Luminance from RGB (Rec.601-ish weights, integer math)
-            const int lum = (77 * px[0] + 150 * px[1] + 29 * px[2]) >> 8;
-            const double freq =
-                info.blackFreq + span * (static_cast<double>(lum) / 255.0);
-            const double phaseStep =
-                2.0 * 3.14159265358979323846 * freq / sampleRate;
-            for (size_t i = 0; i < pixelSamples; ++i) {
+                const uint8_t* px = row + static_cast<size_t>(x) * 3;
+                const double R = px[0], G = px[1], B = px[2];
+                const double Y = 0.299 * R + 0.587 * G + 0.114 * B;
+                double compVal;  // 0..255
+                if (comp == 2) {
+                    compVal = Y;                 // luminance
+                } else if (comp == 0) {
+                    compVal = (R - Y) * 0.5 + 128.0;  // R-Y
+                } else {
+                    compVal = (B - Y) * 0.5 + 128.0;  // B-Y
+                }
+                if (compVal < 0.0) compVal = 0.0;
+                if (compVal > 255.0) compVal = 255.0;
+
+                const double freq =
+                    info.blackFreq + span * (compVal / 255.0);
+                lastPhaseStep =
+                    2.0 * 3.14159265358979323846 * freq / sampleRate;
+                for (size_t i = 0; i < nSamp; ++i) {
+                    out.push_back(
+                        static_cast<float>(std::sin(phase) * amplitude_));
+                    phase += lastPhaseStep;
+                    if (phase > 2.0 * 3.14159265358979323846) {
+                        phase -= 2.0 * 3.14159265358979323846;
+                    }
+                }
+                emitted += nSamp;
+            }
+            // Absorb the rounding remainder into the last pixel (same tone,
+            // so it does not perturb the picture). lastPhaseStep holds the
+            // last pixel's phase increment (kept in scope for the fill).
+            for (size_t i = emitted; i < segSamples; ++i) {
                 out.push_back(
                     static_cast<float>(std::sin(phase) * amplitude_));
-                phase += phaseStep;
+                phase += lastPhaseStep;
                 if (phase > 2.0 * 3.14159265358979323846) {
                     phase -= 2.0 * 3.14159265358979323846;
                 }
