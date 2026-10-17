@@ -6,6 +6,8 @@
 #include "fec/reed_solomon.h"
 #include "modem/afsk_modem.h"
 #include "modem/mftsk_modem.h"
+#include "modem/dpsk_modem.h"
+#include "modem/qam16_modem.h"
 #include "audio/wav_writer.h"
 #include "audio/audio_format.h"
 
@@ -89,6 +91,18 @@ std::vector<float> TxPipeline::encodeTypedFile(const std::string& filePath) {
                          FileCodec::encodeFile(filePath)});
 }
 
+std::vector<float> TxPipeline::encodeTypedImage(const std::string& filePath) {
+    // 数字图片传输：将图片文件的原始字节按 IMAGE 类型打包，经同一条
+    // FEC + 调制链路传输，接收端还原出原文件（无损）。
+    return encodeFrames({TextCodec::encode(std::string(1, 'I')),
+                         FileCodec::encodeFile(filePath, FileCodec::FileType::IMAGE)});
+}
+
+std::vector<float> TxPipeline::encodeTypedVideo(const std::string& filePath) {
+    return encodeFrames({TextCodec::encode(std::string(1, 'V')),
+                         FileCodec::encodeFile(filePath, FileCodec::FileType::VIDEO)});
+}
+
 std::vector<float> TxPipeline::modulateBits(const std::vector<uint8_t>& bits) {
     // Step 3: Hamming FEC encode (optional)
     std::vector<uint8_t> fecBits;
@@ -103,7 +117,7 @@ std::vector<float> TxPipeline::modulateBits(const std::vector<uint8_t>& bits) {
         fecBits = bits;
     }
 
-    // Step 4: Modulate (AFSK or M-FSK, chosen by config).
+    // Step 4: Modulate (AFSK / M-FSK / PSK / QAM, chosen by config).
     if (config_.modemType == ModemType::MFSK) {
         MFSKModem::Config mcfg;
         mcfg.sampleRate = config_.sampleRate;
@@ -113,6 +127,29 @@ std::vector<float> TxPipeline::modulateBits(const std::vector<uint8_t>& bits) {
         mcfg.order = prof.bitsPerSymbol;
         mcfg.symbolRate = prof.symbolRate;
         MFSKModem modem(mcfg);
+        return modem.modulate(fecBits);
+    }
+
+    if (config_.modemType == ModemType::PSK) {
+        // 差分 PSK：符号率/载波由档位决定（载波 = 2 x 符号率，保证符号内
+        // 整数周期）
+        const PskQamProfile prof = pskQamProfileFor(config_.pskQamRate);
+        DPSKModem::Config pcfg;
+        pcfg.sampleRate = config_.sampleRate;
+        pcfg.symbolRate = prof.symbolRate;
+        pcfg.carrierFreq = prof.carrierFreq;
+        pcfg.order = config_.pskOrder;
+        DPSKModem modem(pcfg);
+        return modem.modulate(fecBits);
+    }
+
+    if (config_.modemType == ModemType::QAM) {
+        const PskQamProfile prof = pskQamProfileFor(config_.pskQamRate);
+        QAM16Modem::Config qcfg;
+        qcfg.sampleRate = config_.sampleRate;
+        qcfg.symbolRate = prof.symbolRate;
+        qcfg.carrierFreq = prof.carrierFreq;
+        QAM16Modem modem(qcfg);
         return modem.modulate(fecBits);
     }
 

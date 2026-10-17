@@ -7,12 +7,17 @@
 namespace audiot {
 
 // Modulation mode enumeration
-// PSK/QAM implementations were moved to beta/ (not wired into the
-// TX/RX pipeline; experimental and untested), leaving AFSK as the only
-// active modulation.
+// 旧的 beta/psk_modem 与 beta/qam_modem 因相干载波同步失败（自环即
+// 解不出数据）被移除。这里接入的是重新实现的版本：
+//   - PSK：差分相移键控（DBPSK/DQPSK/D8PSK），接收端用非相干差分解调，
+//          不需要载波相位恢复，从根源上规避了 Costas 环锁定的问题。
+//   - QAM：16-QAM，前导符号兼作导频做信道估计 + 判决导向跟踪。
+// 枚举值持久化到 INI（modemType），故新成员追加在末尾，保持旧值不变。
 enum class ModemType {
     AFSK,   // Audio Frequency Shift Keying
-    MFSK    // Multi-Tone Frequency Shift Keying (FFT-based, 4-FSK default)
+    MFSK,   // Multi-Tone Frequency Shift Keying (FFT-based, 4-FSK default)
+    PSK,    // Differential PSK (DBPSK / DQPSK / D8PSK), non-coherent
+    QAM     // 16-QAM, preamble-assisted coherent demodulation
 };
 
 // Modem abstract interface: converts between bits and audio samples

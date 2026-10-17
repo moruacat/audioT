@@ -43,7 +43,7 @@ void TxPanel::setupUI()
     QHBoxLayout* modeLayout = new QHBoxLayout();
     radioText_ = new QRadioButton(QStringLiteral("文本输入"), this);
     radioFile_ = new QRadioButton(QStringLiteral("文件输入"), this);
-    radioImage_ = new QRadioButton(QStringLiteral("图片（SSTV）"), this);
+    radioImage_ = new QRadioButton(QStringLiteral("图片/视频"), this);
     radioText_->setChecked(true);
 
     QButtonGroup* modeGroup = new QButtonGroup(this);
@@ -139,9 +139,10 @@ void TxPanel::onModeChanged()
 
 void TxPanel::onBrowseInput()
 {
-    // 图片模式：过滤图片文件；文本/文件模式：所有文件
+    // 图片/视频模式：过滤图片与视频文件；文本/文件模式：所有文件。
+    // 实际的载荷类别由发送时按扩展名判定（见 MainWindow::encodeTxInput）。
     const QString filter = radioImage_->isChecked()
-        ? QStringLiteral("图片文件 (*.png *.jpg *.jpeg *.bmp)")
+        ? QStringLiteral("图片/视频 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.mp4 *.avi *.mkv *.mov)")
         : QStringLiteral("所有文件 (*)");
     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择输入文件"),
                                                  QString(), filter);

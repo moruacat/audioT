@@ -99,7 +99,8 @@ std::vector<uint8_t> FileCodec::encodeData(const std::string& filename,
     return frame;
 }
 
-std::vector<uint8_t> FileCodec::encodeFile(const std::string& filePath) {
+std::vector<uint8_t> FileCodec::encodeFile(const std::string& filePath,
+                                           FileType type) {
     // Read entire file (Unicode-safe: Chinese/non-ASCII paths work)
     FILE* f = openFile(filePath, "rb");
     if (!f) {
@@ -125,7 +126,7 @@ std::vector<uint8_t> FileCodec::encodeFile(const std::string& filePath) {
         filename = filePath.substr(lastSlash + 1);
     }
 
-    return encodeData(filename, data);
+    return encodeData(filename, data, type);
 }
 
 FileCodec::DecodedFile FileCodec::decodeFrame(const std::vector<uint8_t>& frame) {

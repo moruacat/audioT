@@ -25,6 +25,32 @@ enum class MftskTier {
     SPORT = 2     // 250 sym/s -> ~500 bps, fastest, use with care
 };
 
+// PSK / QAM 的符号率档位。三档按 44100 Hz 采样率设计：
+//   - samplesPerSymbol = sampleRate / symbolRate 必须整除
+//   - 载波取 2 x 符号率，保证每个符号内整数个载波周期，正交积分无泄漏
+// 因此载波不单独暴露，由符号率推算；这也是为什么只提供固定档位而非
+// 任意数值输入——任意符号率会破坏上述两条约束。
+enum class PskQamRate {
+    ROBUST = 0,   // 735 符号/s，载波 1470 Hz，最抗噪
+    BALANCED = 1, // 1050 符号/s，载波 2100 Hz，默认
+    SPORT = 2     // 1470 符号/s，载波 2940 Hz，吞吐最高但最敏感
+};
+
+// 符号率档位对应的实际参数（符号率 + 载波频率）。
+struct PskQamProfile {
+    int symbolRate;    // symbols/sec
+    float carrierFreq; // Hz，= 2 x symbolRate
+};
+
+// 档位 -> 参数。载波固定为符号率的 2 倍（整数周期约束）。
+inline PskQamProfile pskQamProfileFor(PskQamRate rate) {
+    switch (rate) {
+        case PskQamRate::ROBUST: return PskQamProfile{735, 1470.0f};
+        case PskQamRate::SPORT:  return PskQamProfile{1470, 2940.0f};
+        default:                 return PskQamProfile{1050, 2100.0f};  // BALANCED
+    }
+}
+
 struct PipelineConfig {
     int sampleRate = 44100;
     ModemType modemType = ModemType::AFSK;
@@ -60,6 +86,15 @@ struct PipelineConfig {
     float mftskSlotSpacing = 50.0f;
     int mftskOrder = 2;        // bits per symbol (4-FSK)
     int mftskSymbolRate = 125; // symbols per second (balanced baseline)
+
+    // 差分 PSK 阶数（modemType == PSK 时生效）。其值即每符号比特数：
+    //   1 = DBPSK, 2 = DQPSK（默认）, 3 = D8PSK。
+    // 收发双方必须一致。QAM 固定为 16-QAM（4 bit/符号），没有对应参数。
+    int pskOrder = 2;
+
+    // PSK / QAM 的符号率档位（modemType == PSK 或 QAM 时生效）。见
+    // PskQamRate。符号率与载波由该档位共同决定，收发双方须选同一档。
+    PskQamRate pskQamRate = PskQamRate::BALANCED;
 
     // Duration (seconds) of the continuous prep tone played before the
     // modulated data, giving the receiving device time to prepare

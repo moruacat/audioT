@@ -1,4 +1,4 @@
-﻿// main_window.cpp - Main application window implementation
+// main_window.cpp - Main application window implementation
 #include "main_window.h"
 #include "tx_panel.h"
 #include "rx_panel.h"
@@ -254,6 +254,8 @@ PipelineConfig MainWindow::surfaceConfig(const ModemSettingsWidget* modem) const
         cfg.modemType = m.modemType;
         cfg.fecType = m.fecType;
         cfg.mftskTier = m.mftskTier;
+        cfg.pskOrder = m.pskOrder;
+        cfg.pskQamRate = m.pskQamRate;
         cfg.autoDetectModem = m.autoDetectModem;
     }
     return cfg;
@@ -262,9 +264,9 @@ PipelineConfig MainWindow::surfaceConfig(const ModemSettingsWidget* modem) const
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, QStringLiteral("关于 AudioT"),
-        QStringLiteral("<h3>AudioT v1.5.0</h3>"
+        QStringLiteral("<h3>AudioT v1.6.0</h3>"
                        "<p>音频数据通信软件</p>"
-                       "<p>支持 AFSK / MFSK 调制，"
+                       "<p>支持 AFSK / MFSK / PSK(差分) / 16-QAM 调制，"
                        "Hamming/Reed-Solomon 纠错编码。</p>"
                        "<p>基于 Qt 5.15 + CMake 构建。</p>"));
 }
@@ -321,8 +323,23 @@ bool MainWindow::encodeTxInput(const QString& textOrFile, const PipelineConfig& 
     audiot::TxPipeline tx(config);
     std::vector<float> dataSamples;
     if (isFile) {
-        // 文件发送：以 FileCodec 帧打包（文件名+类型+CRC32）后调制
-        dataSamples = tx.encodeTypedFile(textOrFile.toStdString());
+        // 文件发送：以 FileCodec 帧打包（文件名+类型+CRC32）后调制。
+        // 载荷类别按扩展名判定：图片 -> 'I'，视频 -> 'V'，其余 -> 'F'。
+        // 三者走同一条数字链路（FEC + 调制），接收端据此区分呈现。
+        static const QStringList kImageExt = { QStringLiteral("png"), QStringLiteral("jpg"),
+            QStringLiteral("jpeg"), QStringLiteral("bmp"), QStringLiteral("gif"),
+            QStringLiteral("webp"), QStringLiteral("tif"), QStringLiteral("tiff") };
+        static const QStringList kVideoExt = { QStringLiteral("mp4"), QStringLiteral("avi"),
+            QStringLiteral("mkv"), QStringLiteral("mov"), QStringLiteral("wmv"),
+            QStringLiteral("flv"), QStringLiteral("webm"), QStringLiteral("m4v") };
+        const QString suffix = textOrFile.section(QLatin1Char('.'), -1).toLower();
+        if (kImageExt.contains(suffix)) {
+            dataSamples = tx.encodeTypedImage(textOrFile.toStdString());
+        } else if (kVideoExt.contains(suffix)) {
+            dataSamples = tx.encodeTypedVideo(textOrFile.toStdString());
+        } else {
+            dataSamples = tx.encodeTypedFile(textOrFile.toStdString());
+        }
     } else {
         dataSamples = tx.encodeTypedText(content.toStdString());
     }
@@ -757,14 +774,17 @@ void MainWindow::presentDecodeResult(const DecodeResult& result)
     if (result.type == DecodeResult::TEXT) {
         rxPanel_->onDataReceived(QString::fromUtf8(result.text.c_str()));
     } else {
-        // 文件：弹出保存对话框，默认文件名取帧内携带的名字
+        // 文件/图片/视频：弹出保存对话框，默认文件名取帧内携带的名字
+        const QString kind = (result.type == DecodeResult::IMAGE) ? QStringLiteral("图片")
+                           : (result.type == DecodeResult::VIDEO) ? QStringLiteral("视频")
+                                                                  : QStringLiteral("文件");
         const QString defaultPath = QDir::currentPath() + QLatin1Char('/') +
                                     QString::fromUtf8(result.filename.c_str());
         const QString savePath = QFileDialog::getSaveFileName(
-            this, QStringLiteral("保存接收文件"), defaultPath);
+            this, QStringLiteral("保存接收") + kind, defaultPath);
         if (savePath.isEmpty()) {
-            rxPanel_->onReceiveStatus(QStringLiteral("已放弃保存接收文件"));
-            statusBar()->showMessage(QStringLiteral("已放弃保存接收文件"), 5000);
+            rxPanel_->onReceiveStatus(QStringLiteral("已放弃保存接收") + kind);
+            statusBar()->showMessage(QStringLiteral("已放弃保存接收") + kind, 5000);
         } else {
             QFile file(savePath);
             if (file.open(QIODevice::WriteOnly)) {
@@ -772,9 +792,9 @@ void MainWindow::presentDecodeResult(const DecodeResult& result)
                            static_cast<qint64>(result.fileData.size()));
                 file.close();
                 rxPanel_->onDataReceived(
-                    QStringLiteral("已保存接收文件: ") + savePath +
+                    QStringLiteral("已保存接收") + kind + QStringLiteral(": ") + savePath +
                     QStringLiteral(" (%1 字节)").arg(result.fileData.size()));
-                statusBar()->showMessage(QStringLiteral("文件已保存: ") + savePath, 5000);
+                statusBar()->showMessage(kind + QStringLiteral("已保存: ") + savePath, 5000);
             } else {
                 rxPanel_->onReceiveStatus(QStringLiteral("保存失败: 无法写入文件"));
                 statusBar()->showMessage(QStringLiteral("保存失败"), 5000);
@@ -1002,7 +1022,10 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
         radioPanel_->appendMessage(RadioPanel::MSG_RECV,
             QString::fromUtf8(result.text.c_str()));
     } else {
-        // 文件：自动保存到 exe 目录/接收文件/（聊天软件风格）
+        // 文件/图片/视频：自动保存到 exe 目录/接收文件/（聊天软件风格）
+        const QString kind = (result.type == DecodeResult::IMAGE) ? QStringLiteral("图片")
+                           : (result.type == DecodeResult::VIDEO) ? QStringLiteral("视频")
+                                                                  : QStringLiteral("文件");
         const QString dir = QCoreApplication::applicationDirPath() +
                             QStringLiteral("/接收文件");
         QDir().mkpath(dir);
@@ -1014,11 +1037,11 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
                        static_cast<qint64>(result.fileData.size()));
             file.close();
             radioPanel_->appendMessage(RadioPanel::MSG_RECV,
-                QStringLiteral("收到文件: ") + savePath +
+                QStringLiteral("收到") + kind + QStringLiteral(": ") + savePath +
                 QStringLiteral(" (%1 字节)").arg(result.fileData.size()));
         } else {
             radioPanel_->appendMessage(RadioPanel::MSG_INFO,
-                QStringLiteral("文件保存失败: ") + savePath);
+                kind + QStringLiteral("保存失败: ") + savePath);
         }
     }
     statusBar()->showMessage(QStringLiteral("收到电台消息"), 5000);

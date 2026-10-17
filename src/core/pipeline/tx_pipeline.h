@@ -36,6 +36,15 @@ public:
     // 'F' type marker frame in front.
     std::vector<float> encodeTypedFile(const std::string& filePath);
 
+    // Encode an image file (FileCodec frame carrying IMAGE type) with the
+    // 'I' type marker frame in front. 与文件传输同一条数字链路，仅类型
+    // 不同，供接收端按图片呈现。
+    std::vector<float> encodeTypedImage(const std::string& filePath);
+
+    // Encode a video file (FileCodec frame carrying VIDEO type) with the
+    // 'V' type marker frame in front.
+    std::vector<float> encodeTypedVideo(const std::string& filePath);
+
     // Encode text and write directly to WAV file
     bool encodeToFile(const std::string& text, const std::string& wavPath);
 

@@ -28,10 +28,12 @@ ModemSettingsWidget::ModemSettingsWidget(QWidget* parent)
     : QWidget(parent)
     , layout_(nullptr)
     , tierRow_(-1)
+    , pskOrderRow_(-1)
+    , pskQamRateRow_(-1)
     , autoDetectRow_(-1)
 {
     setupUI();
-    updateTierVisibility();
+    updateModemRowVisibility();
 }
 
 void ModemSettingsWidget::setupUI()
@@ -43,6 +45,8 @@ void ModemSettingsWidget::setupUI()
     comboModem_ = new QComboBox(modemGroup);
     comboModem_->addItem(QStringLiteral("AFSK"), static_cast<int>(ModemType::AFSK));
     comboModem_->addItem(QStringLiteral("MFSK (4-FSK)"), static_cast<int>(ModemType::MFSK));
+    comboModem_->addItem(QStringLiteral("PSK (差分)"), static_cast<int>(ModemType::PSK));
+    comboModem_->addItem(QStringLiteral("16-QAM"), static_cast<int>(ModemType::QAM));
     layout_->addRow(QStringLiteral("调制方式:"), comboModem_);
 
     comboMftskTier_ = new QComboBox(modemGroup);
@@ -52,7 +56,29 @@ void ModemSettingsWidget::setupUI()
     tierRow_ = layout_->rowCount();
     layout_->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
 
-    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式 (AFSK / M-FSK)"), modemGroup);
+    // PSK 阶数（仅在选择差分 PSK 时显示）
+    comboPskOrder_ = new QComboBox(modemGroup);
+    comboPskOrder_->addItem(QStringLiteral("DBPSK (1 bit/符号)"), 1);
+    comboPskOrder_->addItem(QStringLiteral("DQPSK (2 bit/符号)"), 2);
+    comboPskOrder_->addItem(QStringLiteral("D8PSK (3 bit/符号)"), 3);
+    comboPskOrder_->setCurrentIndex(1);  // 默认 DQPSK
+    pskOrderRow_ = layout_->rowCount();
+    layout_->addRow(QStringLiteral("PSK 阶数:"), comboPskOrder_);
+
+    // PSK / QAM 符号率档位（选择差分 PSK 或 16-QAM 时显示）。载波随符号率
+    // 自动取 2 倍（整数周期约束），故不单独暴露，只提供固定档位。
+    comboPskQamRate_ = new QComboBox(modemGroup);
+    comboPskQamRate_->addItem(QStringLiteral("稳健 (735 符号/s, 载波 1470 Hz)"),
+                              static_cast<int>(PskQamRate::ROBUST));
+    comboPskQamRate_->addItem(QStringLiteral("均衡 (1050 符号/s, 载波 2100 Hz)"),
+                              static_cast<int>(PskQamRate::BALANCED));
+    comboPskQamRate_->addItem(QStringLiteral("高速 (1470 符号/s, 载波 2940 Hz)"),
+                              static_cast<int>(PskQamRate::SPORT));
+    comboPskQamRate_->setCurrentIndex(1);  // 默认均衡
+    pskQamRateRow_ = layout_->rowCount();
+    layout_->addRow(QStringLiteral("PSK/QAM 档位:"), comboPskQamRate_);
+
+    checkAutoDetect_ = new QCheckBox(QStringLiteral("自动检测调制方式 (AFSK / M-FSK / PSK / QAM)"), modemGroup);
     autoDetectRow_ = layout_->rowCount();
     layout_->addRow(QString(), checkAutoDetect_);
 
@@ -66,9 +92,13 @@ void ModemSettingsWidget::setupUI()
     // 高速档提示 + 档位可见性联动
     connect(comboMftskTier_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &ModemSettingsWidget::onMftskTierChanged);
-    // 调制方式切换：MFSK 档位行仅在选择 MFSK 时显示；任何变更都通知外部
+    // 调制方式切换：MFSK 档位行 / PSK 阶数行仅在对应调制下显示；任何变更都通知外部
     connect(comboModem_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &ModemSettingsWidget::onModemChanged);
+    connect(comboPskOrder_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &ModemSettingsWidget::changed);
+    connect(comboPskQamRate_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &ModemSettingsWidget::changed);
     connect(comboFEC_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &ModemSettingsWidget::changed);
     connect(checkAutoDetect_, &QCheckBox::toggled, this, &ModemSettingsWidget::changed);
@@ -80,16 +110,27 @@ void ModemSettingsWidget::setupUI()
 
 void ModemSettingsWidget::onModemChanged(int index)
 {
-    updateTierVisibility();
+    updateModemRowVisibility();
     emit changed();
 }
 
-void ModemSettingsWidget::updateTierVisibility()
+void ModemSettingsWidget::updateModemRowVisibility()
 {
-    if (!layout_ || tierRow_ < 0) return;
-    const bool isMfsk =
-        (comboModem_->currentData().toInt() == static_cast<int>(ModemType::MFSK));
-    setFormRowVisible(layout_, comboMftskTier_, isMfsk);
+    if (!layout_) return;
+    const int mt = comboModem_->currentData().toInt();
+    if (tierRow_ >= 0) {
+        setFormRowVisible(layout_, comboMftskTier_,
+                          mt == static_cast<int>(ModemType::MFSK));
+    }
+    if (pskOrderRow_ >= 0) {
+        setFormRowVisible(layout_, comboPskOrder_,
+                          mt == static_cast<int>(ModemType::PSK));
+    }
+    if (pskQamRateRow_ >= 0) {
+        setFormRowVisible(layout_, comboPskQamRate_,
+                          mt == static_cast<int>(ModemType::PSK) ||
+                          mt == static_cast<int>(ModemType::QAM));
+    }
 }
 
 void ModemSettingsWidget::setAutoDetectVisible(bool visible)
@@ -115,6 +156,8 @@ PipelineConfig ModemSettingsWidget::getPipelineConfig() const
     cfg.modemType = static_cast<ModemType>(comboModem_->currentData().toInt());
     cfg.fecType = static_cast<FecType>(comboFEC_->currentData().toInt());
     cfg.mftskTier = static_cast<MftskTier>(comboMftskTier_->currentData().toInt());
+    cfg.pskOrder = comboPskOrder_->currentData().toInt();
+    cfg.pskQamRate = static_cast<PskQamRate>(comboPskQamRate_->currentData().toInt());
     cfg.autoDetectModem = checkAutoDetect_->isChecked();
     return cfg;
 }
@@ -127,6 +170,10 @@ void ModemSettingsWidget::setFromConfig(const PipelineConfig& cfg)
         comboFEC_->findData(static_cast<int>(cfg.fecType)));
     comboMftskTier_->setCurrentIndex(
         comboMftskTier_->findData(static_cast<int>(cfg.mftskTier)));
+    comboPskOrder_->setCurrentIndex(
+        comboPskOrder_->findData(cfg.pskOrder));
+    comboPskQamRate_->setCurrentIndex(
+        comboPskQamRate_->findData(static_cast<int>(cfg.pskQamRate)));
     checkAutoDetect_->setChecked(cfg.autoDetectModem);
 }
 
@@ -164,19 +211,26 @@ void ModemSettingsWidget::loadSettings(const QString& surfaceKey)
                                        static_cast<int>(FecType::HAMMING)).toInt();
     const int tier = settings.value(QStringLiteral("mftskTier"),
                                     static_cast<int>(MftskTier::BALANCED)).toInt();
+    const int pskOrder = settings.value(QStringLiteral("pskOrder"), 2).toInt();
+    const int pskQamRate = settings.value(QStringLiteral("pskQamRate"),
+                                        static_cast<int>(PskQamRate::BALANCED)).toInt();
     const bool autoDetect = settings.value(QStringLiteral("autoDetectModem"), true).toBool();
     settings.endGroup();
 
     // Sanity-guard against a corrupt config: fall back to defaults.
     if (comboModem_->findData(modemType) < 0 ||
         comboFEC_->findData(fecType) < 0 ||
-        comboMftskTier_->findData(tier) < 0) {
+        comboMftskTier_->findData(tier) < 0 ||
+        comboPskOrder_->findData(pskOrder) < 0 ||
+        comboPskQamRate_->findData(pskQamRate) < 0) {
         return;  // keep widget defaults
     }
 
     comboModem_->setCurrentIndex(comboModem_->findData(modemType));
     comboFEC_->setCurrentIndex(comboFEC_->findData(fecType));
     comboMftskTier_->setCurrentIndex(comboMftskTier_->findData(tier));
+    comboPskOrder_->setCurrentIndex(comboPskOrder_->findData(pskOrder));
+    comboPskQamRate_->setCurrentIndex(comboPskQamRate_->findData(pskQamRate));
     checkAutoDetect_->setChecked(autoDetect);
 }
 
@@ -188,6 +242,8 @@ void ModemSettingsWidget::saveSettings(const QString& surfaceKey) const
     settings.setValue(QStringLiteral("modemType"), comboModem_->currentData().toInt());
     settings.setValue(QStringLiteral("fecType"), comboFEC_->currentData().toInt());
     settings.setValue(QStringLiteral("mftskTier"), comboMftskTier_->currentData().toInt());
+    settings.setValue(QStringLiteral("pskOrder"), comboPskOrder_->currentData().toInt());
+    settings.setValue(QStringLiteral("pskQamRate"), comboPskQamRate_->currentData().toInt());
     settings.setValue(QStringLiteral("autoDetectModem"), checkAutoDetect_->isChecked());
     settings.endGroup();
     settings.sync();

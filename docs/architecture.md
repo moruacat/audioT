@@ -39,7 +39,7 @@ graph TB
 | 接口定义 | `interfaces/` | `IModem`、`ICodec`、`IAudioStream`、`IPipeline` 抽象 |
 | 内容编解码 | `codec/` | `TextCodec`（文本帧+CRC16）、`FileCodec`（文件帧+CRC32+分片）、`ImageCodec`、`VideoCodec` |
 | 前向纠错 | `fec/` | `HammingCodec`(7,4)、`ReedSolomon` GF(2^8)、`LDPCCodec`(256,128) Min-Sum |
-| 调制解调 | `modem/` | `AFSKModem`(Bell 202 风格)、`MFSKModem`（FFT 4-FSK） |
+| 调制解调 | `modem/` | `AFSKModem`(Bell 202 风格)、`MFSKModem`（FFT 4-FSK）、`DPSKModem`（差分 PSK：DBPSK/DQPSK/D8PSK，非相干差分解调）、`QAM16Modem`（16-QAM，前导辅助相干解调） |
 | DSP 工具 | `dsp/` | FFT 封装、FIR/IIR 滤波器、窗函数、相关器 |
 | 降噪 | `noise/` | 噪声剖面、谱减法、陷波滤波、噪声滤波 |
 | 收发管线 | `pipeline/` | `TxPipeline` / `RxPipeline` 串联以上模块 |

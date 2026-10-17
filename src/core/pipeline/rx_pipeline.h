@@ -9,14 +9,15 @@
 
 namespace audiot {
 
-// Result of decoding received audio: the type marker frame ('T'/'F')
-// transmitted right after the prep tone decides whether the payload is
-// text or a file.
+// Result of decoding received audio: the type marker frame ('T'/'F'/'I'/'V')
+// transmitted right after the prep tone decides how the payload is presented.
 struct DecodeResult {
     enum Type {
         NONE = 0,   // nothing decodable found
         TEXT,       // payload is text
-        FILE        // payload is a file (filename + raw data)
+        FILE,       // payload is a file (filename + raw data)
+        IMAGE,      // payload is an image file (数字图片传输)
+        VIDEO       // payload is a video file (数字视频传输)
     };
 
     Type type = NONE;

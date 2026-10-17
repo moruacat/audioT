@@ -27,8 +27,11 @@ public:
         VIDEO = 3
     };
 
-    // Encode: read file and wrap into a transmission frame
-    static std::vector<uint8_t> encodeFile(const std::string& filePath);
+    // Encode: read file and wrap into a transmission frame.
+    // type 标记载荷类别（GENERIC / IMAGE / VIDEO ...），接收端据此决定
+    // 如何呈现；默认 GENERIC。
+    static std::vector<uint8_t> encodeFile(const std::string& filePath,
+                                           FileType type = FileType::GENERIC);
 
     // Encode: wrap in-memory data into a transmission frame
     static std::vector<uint8_t> encodeData(const std::string& filename,

@@ -47,14 +47,18 @@ private slots:
 
 private:
     void setupUI();
-    void updateTierVisibility();
+    void updateModemRowVisibility();
 
     QFormLayout* layout_;
-    int tierRow_;        // QFormLayout 行号（MFSK 档位）
-    int autoDetectRow_;  // QFormLayout 行号（自动检测）
+    int tierRow_;         // QFormLayout 行号（MFSK 档位）
+    int pskOrderRow_;     // QFormLayout 行号（PSK 阶数）
+    int pskQamRateRow_;   // QFormLayout 行号（PSK/QAM 符号率档位）
+    int autoDetectRow_;   // QFormLayout 行号（自动检测）
 
     QComboBox* comboModem_;
     QComboBox* comboMftskTier_;
+    QComboBox* comboPskOrder_;
+    QComboBox* comboPskQamRate_;
     QCheckBox* checkAutoDetect_;
     QComboBox* comboFEC_;
 };

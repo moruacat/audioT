@@ -6,6 +6,8 @@
 #include "fec/reed_solomon.h"
 #include "modem/afsk_modem.h"
 #include "modem/mftsk_modem.h"
+#include "modem/dpsk_modem.h"
+#include "modem/qam16_modem.h"
 #include "audio/wav_reader.h"
 
 #include <algorithm>
@@ -22,24 +24,19 @@ DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec)
     DecodeResult result;
 
     // autoDetectModem (via config): try the configured modulation first,
-    // then the other one, returning whichever yields a valid frame. This
+    // then the others, returning whichever yields a valid frame. This
     // lets a receiver cope with a sender that uses a different modulation
-    // without manual re-configuration. Cost is one extra demodulation on
-    // failure; demodulations are cheap.
+    // without manual re-configuration. Cost is one extra demodulation per
+    // failed attempt; demodulations are cheap.
     std::vector<std::pair<ModemType, std::vector<float>>> attempts;
-
-    if (config_.modemType == ModemType::MFSK) {
-        attempts.push_back(std::make_pair(ModemType::MFSK, samples));
-        if (config_.autoDetectModem) {
-            // M-FSK carries its own preamble sync and tolerates leading
-            // silence, so pass the raw buffer; AFSK needs the prep-tone
-            // crop below.
-            attempts.push_back(std::make_pair(ModemType::AFSK, samples));
-        }
-    } else {
-        attempts.push_back(std::make_pair(ModemType::AFSK, samples));
-        if (config_.autoDetectModem) {
-            attempts.push_back(std::make_pair(ModemType::MFSK, samples));
+    attempts.push_back(std::make_pair(config_.modemType, samples));
+    if (config_.autoDetectModem) {
+        const ModemType all[] = { ModemType::AFSK, ModemType::MFSK,
+                                  ModemType::PSK, ModemType::QAM };
+        for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
+            if (all[i] != config_.modemType) {
+                attempts.push_back(std::make_pair(all[i], samples));
+            }
         }
     }
 
@@ -56,6 +53,40 @@ DecodeResult RxPipeline::decode(const std::vector<float>& samples, bool autoFec)
             mcfg.order = prof.bitsPerSymbol;
             mcfg.symbolRate = prof.symbolRate;
             MFSKModem modem(mcfg);
+            std::vector<uint8_t> fecBits = modem.demodulate(buf);
+            if (!fecBits.empty()) {
+                DecodeResult r = continueFec(fecBits, autoFec);
+                if (r.valid()) {
+                    return r;
+                }
+            }
+        } else if (mt == ModemType::PSK) {
+            // 差分 PSK：同样自带前导同步、容忍前置静音/杂音，直接解原始
+            // buffer（无需像 AFSK 那样裁剪 prep tone）。
+            DPSKModem::Config pcfg;
+            pcfg.sampleRate = config_.sampleRate;
+            const PskQamProfile prof = pskQamProfileFor(config_.pskQamRate);
+            pcfg.symbolRate = prof.symbolRate;
+            pcfg.carrierFreq = prof.carrierFreq;
+            pcfg.order = config_.pskOrder;
+            DPSKModem modem(pcfg);
+
+            std::vector<uint8_t> fecBits = modem.demodulate(buf);
+            if (!fecBits.empty()) {
+                DecodeResult r = continueFec(fecBits, autoFec);
+                if (r.valid()) {
+                    return r;
+                }
+            }
+        } else if (mt == ModemType::QAM) {
+            // 16-QAM：前导兼作导频做信道估计，同样直接解原始 buffer。
+            QAM16Modem::Config qcfg;
+            qcfg.sampleRate = config_.sampleRate;
+            const PskQamProfile qprof = pskQamProfileFor(config_.pskQamRate);
+            qcfg.symbolRate = qprof.symbolRate;
+            qcfg.carrierFreq = qprof.carrierFreq;
+            QAM16Modem modem(qcfg);
+
             std::vector<uint8_t> fecBits = modem.demodulate(buf);
             if (!fecBits.empty()) {
                 DecodeResult r = continueFec(fecBits, autoFec);
@@ -180,7 +211,8 @@ DecodeResult RxPipeline::decodeWithFec(const std::vector<uint8_t>& fecBits,
     }
 
     if (first.payload.size() == 1 &&
-        (first.payload[0] == 'T' || first.payload[0] == 'F')) {
+        (first.payload[0] == 'T' || first.payload[0] == 'F' ||
+         first.payload[0] == 'I' || first.payload[0] == 'V')) {
         if (first.payload[0] == 'T') {
             // Text data frame (same framing/CRC as the type marker)
             const TextCodec::FrameInfo data =
@@ -191,16 +223,25 @@ DecodeResult RxPipeline::decodeWithFec(const std::vector<uint8_t>& fecBits,
             result.type = DecodeResult::TEXT;
             result.text = data.payload;
         } else {
-            // File data frame (FileCodec framing: name + data + CRC-32)
+            // File data frame (FileCodec framing: name + type + data + CRC-32).
+            // 'F' = 通用文件，'I' = 图片，'V' = 视频——后两者与通用文件走
+            // 完全相同的数字链路，只是载荷类别不同，供接收端按类别呈现。
             const std::vector<uint8_t> rest(framed.begin() + first.frameEnd,
                                             framed.end());
             const FileCodec::DecodedFile file = FileCodec::decodeFrame(rest);
             if (!file.valid) {
                 return result;
             }
-            result.type = DecodeResult::FILE;
             result.filename = file.filename;
             result.fileData = file.data;
+            const char marker = static_cast<char>(first.payload[0]);
+            if (marker == 'I' && file.type == FileCodec::FileType::IMAGE) {
+                result.type = DecodeResult::IMAGE;
+            } else if (marker == 'V' && file.type == FileCodec::FileType::VIDEO) {
+                result.type = DecodeResult::VIDEO;
+            } else {
+                result.type = DecodeResult::FILE;
+            }
         }
         return result;
     }

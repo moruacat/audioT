@@ -26,8 +26,9 @@ AudioT is an audio-based data communication application: it encodes **text / fil
 - **Coding support**:
   - Text (TextCodec)
   - File (FileCodec)
+  - **Image / video digital transfer**: packaged with a type marker (`'I'` image / `'V'` video) over the same FEC + modulation link, losslessly reassembled at the receiver
 
-> Note: the PSK / QAM modem implementations were moved out of the main source tree into [beta/](beta/) (experimental, untested); the LDPC FEC implementation is likewise not wired into the TX/RX pipeline, so none of them are listed as supported features.
+> Note: the LDPC FEC implementation is not wired into the TX/RX pipeline, so it is not listed as a supported feature. The old PSK/QAM coherent implementations (failed even in loopback) have been replaced by `src/core/modem/dpsk_modem` and `src/core/modem/qam16_modem`; the former `beta/` archive has been removed.
 
 ### Audio Processing
 - Multiple audio backends (Qt Multimedia for Windows/macOS, ALSA for Linux)
