@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QListWidget>
 #include <QLabel>
+#include <QProgressBar>
 
 class QResizeEvent;
 
@@ -40,10 +41,18 @@ signals:
     void stopListening();
     // textOrFile：输入框文本（文本消息）或文件路径（文件消息）
     void sendRequested(const QString& textOrFile);
+    // 发送中点击"停止"（面板内已二次确认）——主窗口据此中止发射
+    void stopSendRequested();
 
 public slots:
     void appendMessage(int kind, const QString& text);
+    // 文件消息：显示为可点击的文件名（点击用系统默认程序打开）
+    void appendFileMessage(int kind, const QString& displayName, const QString& filePath);
     void setListening(bool on);
+    // 发送状态：发送中禁用输入与调制选项、发送键变"停止"、显示进度条
+    void setSending(bool on);
+    // 发射进度：0-100；负值表示不确定（准备音阶段）
+    void setSendProgress(int percent);
 
 private slots:
     void onSendClicked();
@@ -58,6 +67,9 @@ private:
     static QString timestamp();
     // 气泡对话框样式：己方绿色右对齐、对方灰色左对齐、系统居中灰字
     QWidget* createBubble(int kind, const QString& text, const QString& ts);
+    // 文件气泡：可点击的文件名链接（系统默认程序打开）
+    QWidget* createFileBubble(int kind, const QString& name, const QString& path,
+                              const QString& ts);
 
     QListWidget* chatLog_;
     QLabel* hintLabel_;                 // 空列表提示（首条消息后隐藏）
@@ -67,6 +79,8 @@ private:
     QPushButton* btnListen_;
     QPushButton* btnStop_;
     QLabel* labelStatus_;
+    QProgressBar* sendProgress_;        // 发射进度（仅发送中显示）
+    bool sending_;                      // 是否正在发送
     ModemSettingsWidget* modemSettings_;
 };
 

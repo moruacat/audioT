@@ -46,6 +46,7 @@ private slots:
     void onRadioStartListening();
     void onRadioStopListening();
     void onRadioSend(const QString& textOrFile);
+    void onRadioStopSend();   // 发送中点击"停止"（面板内已二次确认）
 
 private:
     void setupUI();
@@ -121,6 +122,8 @@ private:
     size_t txPlaybackPos_;
     size_t txDataStart_;                    // index where data audio begins
     int txDrainTicks_;                      // ticks elapsed after last sample written
+    // 本次发射来自电台面板还是发射面板：决定进度/状态回报到哪个面板
+    bool txFromRadio_;
 
     // 电台模式状态（监听切段 + 后台段解码）
     bool radioListening_;                   // 麦克风监听中
@@ -128,6 +131,8 @@ private:
     std::thread* radioParseThread_;         // 段解码线程（结果回 UI）
     std::atomic<bool> radioAborted_;        // 监听停止后丢弃过期解析结果
     std::atomic<int> radioParseGen_;        // 区分新旧段解码回调
+    std::atomic<bool> radioParseRunning_;   // 该线程是否仍在解码：
+                                            // 音频回调线程绝不 join 等待它
 
     // 接收面板麦克风实时模式状态（与电台监听互斥，共享输入设备）
     bool rxMicListening_;                   // 麦克风监听中
@@ -135,6 +140,8 @@ private:
     std::thread* rxMicParseThread_;         // 段解码线程（结果回 UI）
     std::atomic<bool> rxMicAborted_;        // 监听停止后丢弃过期解析结果
     std::atomic<int> rxMicParseGen_;        // 区分新旧段解码回调
+    std::atomic<bool> rxMicParseRunning_;   // 该线程是否仍在解码：
+                                            // 音频回调线程绝不 join 等待它
 
     // RX WAV 后台解析：长音频不阻塞 UI，停止时丢弃结果
     std::thread* rxParseThread_;

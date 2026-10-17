@@ -16,11 +16,14 @@
 #include <QApplication>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QDir>
+#include <QStandardPaths>
 #include <QLineEdit>
 #include <QIcon>
 #include <QMetaObject>
 #include <QCoreApplication>
+#include <QTabWidget>
 #include <cmath>
 
 #include "core/pipeline/tx_pipeline.h"
@@ -49,14 +52,17 @@ MainWindow::MainWindow(QWidget* parent)
     , txPlaybackPos_(0)
     , txDataStart_(0)
     , txDrainTicks_(0)
+    , txFromRadio_(false)
     , radioListening_(false)
     , radioParseThread_(nullptr)
     , radioAborted_(false)
     , radioParseGen_(0)
+    , radioParseRunning_(false)
     , rxMicListening_(false)
     , rxMicParseThread_(nullptr)
     , rxMicAborted_(false)
     , rxMicParseGen_(0)
+    , rxMicParseRunning_(false)
     , rxParseThread_(nullptr)
     , rxParseAborted_(false)
     , rxParseGen_(0)
@@ -91,6 +97,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (txPanel_) txPanel_->loadPanelSettings();
         if (rxPanel_) rxPanel_->loadPanelSettings();
         if (radioPanel_) radioPanel_->loadPanelSettings();
+        // 调制设置载入后刷新右侧"高级设置"面板（初始选项卡为"发射"）
+        if (settingsDialog_) {
+            settingsDialog_->setActiveModem(txPanel_ ? txPanel_->modemSettings() : nullptr);
+        }
         // 应用设备选择（原"工具→设置"入口逻辑，菜单已移除）
         onSettings();
     });
@@ -220,6 +230,23 @@ void MainWindow::connectSignals()
             this, &MainWindow::onRadioStopListening);
     connect(radioPanel_, &RadioPanel::sendRequested,
             this, &MainWindow::onRadioSend);
+    connect(radioPanel_, &RadioPanel::stopSendRequested,
+            this, &MainWindow::onRadioStopSend);
+
+    // 设置面板：音频设备选择变更 -> 即时应用（onSettings 里 setDevice）
+    connect(settingsDialog_, &SettingsDialog::devicesChanged,
+            this, &MainWindow::onSettings);
+
+    // 右侧"高级设置"跟随当前收发选项卡：切到哪个选项卡，就显示/编辑
+    // 那个选项卡的调制高级参数（并按其调制方式显隐）
+    connect(tabWidget_, &QTabWidget::currentChanged, this, [this](int idx) {
+        ModemSettingsWidget* m = nullptr;
+        if (idx == 0) m = txPanel_->modemSettings();
+        else if (idx == 1) m = rxPanel_->modemSettings();
+        else if (idx == 2) m = radioPanel_->modemSettings();
+        settingsDialog_->setActiveModem(m);
+    });
+    settingsDialog_->setActiveModem(txPanel_->modemSettings());
 
     // Audio input callback -> waveform display + radio/rx-mic segmenting
     audioInput_->setCallback([this](const float* samples, int count) {
@@ -257,6 +284,11 @@ PipelineConfig MainWindow::surfaceConfig(const ModemSettingsWidget* modem) const
         cfg.pskOrder = m.pskOrder;
         cfg.pskQamRate = m.pskQamRate;
         cfg.autoDetectModem = m.autoDetectModem;
+        // AFSK 的 Mark/Space/波特率同样是 per-tab（由右侧设置面板代理编辑，
+        // 保存在该选项卡的 ModemSettingsWidget 里）
+        cfg.markFreq = m.markFreq;
+        cfg.spaceFreq = m.spaceFreq;
+        cfg.baudRate = m.baudRate;
     }
     return cfg;
 }
@@ -264,7 +296,7 @@ PipelineConfig MainWindow::surfaceConfig(const ModemSettingsWidget* modem) const
 void MainWindow::onAbout()
 {
     QMessageBox::about(this, QStringLiteral("关于 AudioT"),
-        QStringLiteral("<h3>AudioT v1.6.0</h3>"
+        QStringLiteral("<h3>AudioT v1.7.0</h3>"
                        "<p>音频数据通信软件</p>"
                        "<p>支持 AFSK / MFSK / PSK(差分) / 16-QAM 调制，"
                        "Hamming/Reed-Solomon 纠错编码。</p>"
@@ -279,6 +311,7 @@ void MainWindow::onStartTransmission(const QString& textOrFile)
     }
 
     config_ = surfaceConfig(txPanel_->modemSettings());
+    txFromRadio_ = false;   // 本次发射来自发射面板
     statusBar()->showMessage(QStringLiteral("开始发射..."));
 
     // Encode text -> modulated audio samples (fast, pure CPU work)
@@ -539,10 +572,16 @@ bool MainWindow::beginTxPlayback(const std::vector<float>& dataSamples,
         }
     }
 
-    txPanel_->onTransmissionProgress(0);
-    txPanel_->onTransmissionStatus(withPrepTone
-        ? QStringLiteral("准备音中...")
-        : QStringLiteral("发射中..."));
+    if (txFromRadio_) {
+        // 电台面板发射：进度/状态回报到电台面板（发送中锁定选项、显示进度条）
+        radioPanel_->setSending(true);
+        radioPanel_->setSendProgress(withPrepTone ? -1 : 0);
+    } else {
+        txPanel_->onTransmissionProgress(0);
+        txPanel_->onTransmissionStatus(withPrepTone
+            ? QStringLiteral("准备音中...")
+            : QStringLiteral("发射中..."));
+    }
     statusBar()->showMessage(withPrepTone
         ? (QStringLiteral("准备音中... (") +
            QString::number(static_cast<double>(config_.prepToneSeconds), 'f', 0) +
@@ -581,15 +620,19 @@ void MainWindow::onTxPlaybackTick()
 
         // Phase-aware status + overall progress
         const bool inPrep = txPlaybackPos_ < txDataStart_;
-        txPanel_->onTransmissionStatus(inPrep
-            ? QStringLiteral("准备音中...")
-            : QStringLiteral("发射中..."));
         statusBar()->showMessage(inPrep
             ? QStringLiteral("准备音中...")
             : QStringLiteral("发射中..."));
         if (total > 0) {
-            txPanel_->onTransmissionProgress(
-                static_cast<int>(txPlaybackPos_ * 100 / total));
+            const int pct = static_cast<int>(txPlaybackPos_ * 100 / total);
+            if (txFromRadio_) {
+                radioPanel_->setSendProgress(pct);
+            } else {
+                txPanel_->onTransmissionStatus(inPrep
+                    ? QStringLiteral("准备音中...")
+                    : QStringLiteral("发射中..."));
+                txPanel_->onTransmissionProgress(pct);
+            }
         }
     } else {
         // All samples handed to QAudioOutput. Wait for the hardware
@@ -626,6 +669,14 @@ void MainWindow::finishTxPlayback(bool aborted)
 
     if (audioOutput_->isRunning()) {
         audioOutput_->stop();
+    }
+
+    if (txFromRadio_) {
+        // 电台面板：结束"发送中"状态（按钮/选项恢复），不写发射面板
+        radioPanel_->setSending(false);
+        statusBar()->showMessage(aborted ? QStringLiteral("发送已停止")
+                                         : QStringLiteral("发送完成"), 5000);
+        return;
     }
 
     if (aborted) {
@@ -908,6 +959,7 @@ void MainWindow::onRadioSend(const QString& textOrFile)
         finishTxPlayback(true);
     }
 
+    txFromRadio_ = true;   // 本次发射来自电台面板
     config_ = surfaceConfig(radioPanel_->modemSettings());
     std::vector<float> dataSamples;
     QString err;
@@ -922,12 +974,29 @@ void MainWindow::onRadioSend(const QString& textOrFile)
         return;
     }
 
-    // 自己的消息上屏（文件消息带标记）
+    // 自己的消息上屏：文件用可点击链接气泡，文本用普通气泡
     const bool isFile = textOrFile.contains(QStringLiteral(".")) &&
                         (textOrFile.contains(QStringLiteral("/")) ||
                          textOrFile.contains(QStringLiteral("\\")));
-    radioPanel_->appendMessage(RadioPanel::MSG_SEND,
-        isFile ? (QStringLiteral("[文件] ") + textOrFile) : textOrFile);
+    if (isFile) {
+        radioPanel_->appendFileMessage(RadioPanel::MSG_SEND,
+            QFileInfo(textOrFile).fileName(), textOrFile);
+    } else {
+        radioPanel_->appendMessage(RadioPanel::MSG_SEND, textOrFile);
+    }
+}
+
+void MainWindow::onRadioStopSend()
+{
+    // 发送中点击"停止"（面板已二次确认）：中止发射，并给对方发一条
+    // 「停止消息」，让正在收听的对方知道发送已中止。
+    const bool wasRadio = txFromRadio_;
+    if (txPlaybackTimer_->isActive() || audioOutput_->isRunning()) {
+        finishTxPlayback(true);
+    }
+    if (wasRadio) {
+        onRadioSend(QStringLiteral("[发送已停止]"));
+    }
 }
 
 void MainWindow::accumulateRadio(const float* samples, int count)
@@ -986,14 +1055,23 @@ void MainWindow::accumulateSegment(SegmentState& st,
 
 void MainWindow::submitRadioSegment(std::vector<float>& segment)
 {
-    // 提交到后台线程解码（与 WAV 解析相同的 RxPipeline 路径）
+    // 提交到后台线程解码（与 WAV 解析相同的 RxPipeline 路径）。
+    //
+    // 本函数由音频回调线程调用，因此**绝不能 join 正在解码的线程**：
+    // 一次解码可能耗时数百毫秒，若在此阻塞，音频回调会被拖住，进而使
+    // QAudioInput::stop() 长时间等待（表现为"停止监听无响应"）。
+    // 上一次解码尚未完成时直接丢弃本段 —— 实时监听宁丢帧、不卡顿。
+    if (radioParseRunning_.load()) {
+        return;
+    }
     if (radioParseThread_ && radioParseThread_->joinable()) {
-        radioParseThread_->join();
+        radioParseThread_->join();   // 此时线程已结束，join 立即返回
         delete radioParseThread_;
         radioParseThread_ = nullptr;
     }
     PipelineConfig cfg = config_;
     const int gen = ++radioParseGen_;
+    radioParseRunning_ = true;
     radioParseThread_ = new std::thread([this, segment, cfg, gen]() {
         audiot::RxPipeline rx(cfg);
         DecodeResult result = rx.decode(segment, true);
@@ -1007,6 +1085,7 @@ void MainWindow::submitRadioSegment(std::vector<float>& segment)
                 presentRadioResult(result);
             },
             Qt::QueuedConnection);
+        radioParseRunning_ = false;   // 本线程已结束，可被安全回收
     });
 }
 
@@ -1022,23 +1101,24 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
         radioPanel_->appendMessage(RadioPanel::MSG_RECV,
             QString::fromUtf8(result.text.c_str()));
     } else {
-        // 文件/图片/视频：自动保存到 exe 目录/接收文件/（聊天软件风格）
+        // 文件/图片/视频：保存到系统「下载」目录（聊天软件风格），并在聊天
+        // 界面显示为可点击的文件气泡（点击用系统默认程序打开）。
         const QString kind = (result.type == DecodeResult::IMAGE) ? QStringLiteral("图片")
                            : (result.type == DecodeResult::VIDEO) ? QStringLiteral("视频")
                                                                   : QStringLiteral("文件");
-        const QString dir = QCoreApplication::applicationDirPath() +
-                            QStringLiteral("/接收文件");
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (dir.isEmpty()) {
+            dir = QCoreApplication::applicationDirPath() + QStringLiteral("/接收文件");
+        }
         QDir().mkpath(dir);
-        const QString savePath = dir + QLatin1Char('/') +
-                                 QString::fromUtf8(result.filename.c_str());
+        const QString fileName = QString::fromUtf8(result.filename.c_str());
+        const QString savePath = dir + QLatin1Char('/') + fileName;
         QFile file(savePath);
         if (file.open(QIODevice::WriteOnly)) {
             file.write(reinterpret_cast<const char*>(result.fileData.data()),
                        static_cast<qint64>(result.fileData.size()));
             file.close();
-            radioPanel_->appendMessage(RadioPanel::MSG_RECV,
-                QStringLiteral("收到") + kind + QStringLiteral(": ") + savePath +
-                QStringLiteral(" (%1 字节)").arg(result.fileData.size()));
+            radioPanel_->appendFileMessage(RadioPanel::MSG_RECV, fileName, savePath);
         } else {
             radioPanel_->appendMessage(RadioPanel::MSG_INFO,
                 kind + QStringLiteral("保存失败: ") + savePath);
@@ -1058,14 +1138,20 @@ void MainWindow::accumulateRxMic(const float* samples, int count)
 
 void MainWindow::submitRxMicSegment(std::vector<float>& segment)
 {
-    // 提交到后台线程解码（与电台段解码相同的路径）
+    // 提交到后台线程解码（与电台段解码相同的路径）。
+    // 同 submitRadioSegment：本函数在音频回调线程里执行，绝不 join 正在
+    // 解码的线程，未完成时丢弃本段。
+    if (rxMicParseRunning_.load()) {
+        return;
+    }
     if (rxMicParseThread_ && rxMicParseThread_->joinable()) {
-        rxMicParseThread_->join();
+        rxMicParseThread_->join();   // 此时线程已结束，join 立即返回
         delete rxMicParseThread_;
         rxMicParseThread_ = nullptr;
     }
     PipelineConfig cfg = config_;
     const int gen = ++rxMicParseGen_;
+    rxMicParseRunning_ = true;
     rxMicParseThread_ = new std::thread([this, segment, cfg, gen]() {
         audiot::RxPipeline rx(cfg);
         DecodeResult result = rx.decode(segment, true);
@@ -1079,6 +1165,7 @@ void MainWindow::submitRxMicSegment(std::vector<float>& segment)
                 presentRxMicResult(result);
             },
             Qt::QueuedConnection);
+        rxMicParseRunning_ = false;   // 本线程已结束，可被安全回收
     });
 }
 
