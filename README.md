@@ -2,6 +2,9 @@
 
 AudioT 是一个基于音频信号的数据收发软件：它将**文本 / 文件**编码为音频，可通过**磁带机、广播电台**等途径进行数据传输（传输前可用底噪录音自动调参以抑制麦克风电流声与交流电干扰）。实时模式与 WAV 文件模式均可。
 
+## 界面预览
+<img width="917" height="752" alt="image" src="https://github.com/user-attachments/assets/806a092d-6ba8-4c35-b71f-b5fada15a8fe" />
+
 ## 功能特性
 
 ### 数据传输
