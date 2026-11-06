@@ -46,6 +46,8 @@ private slots:
 
 private:
     void setupUI();
+    // 刷新 labelHint_ 的文案与颜色（error=true 时用红色，否则灰色）
+    void setHint(const QString& text, bool error);
 
     // Input mode
     QRadioButton* radioText_;
@@ -66,7 +68,9 @@ private:
     // Control
     QPushButton* btnStart_;
     QPushButton* btnStop_;
-    QLabel* labelWarning_;       // 红色警告：发射时巨大噪音
+    // 状态提示：随发射阶段给出具体文字（空闲为普通灰色提示，
+    // 出错时才用红色），不再是常驻的红色"巨大噪音"警告
+    QLabel* labelHint_;
     QProgressBar* progress_;
     QLabel* labelStatus_;
 };

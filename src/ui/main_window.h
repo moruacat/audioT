@@ -7,6 +7,7 @@
 #include <QAction>
 #include <QTimer>
 
+#include <memory>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -93,6 +94,26 @@ private:
     bool encodeTxInput(const QString& textOrFile, const PipelineConfig& config,
                        std::vector<float>& outSamples, QString& errorMsg);
 
+    // 电台发送：编码 + 播放；echoLocal 决定是否把本机消息上屏。
+    // 返回 false 表示发送未能启动（编码/音频输出失败）。
+    bool sendRadioPayload(const QString& textOrFile, bool echoLocal);
+
+    // 异步编码 + 播放：调制大文件（如 32KB，经 FEC 后约 46 万比特）
+    // 需生成上千万个音频样本，放在工作线程做，UI 全程可响应并显示"编码中"。
+    void startTransmissionAsync(const QString& textOrFile, bool fromRadio,
+                                bool echoLocal);
+    // 使在途的后台编码结果失效（停止/取消时调用）
+    void cancelPendingEncode();
+    // 回收已结束的编码线程（只 join 已置 finished 的，不会阻塞 UI）
+    void reapEncodeJobs();
+
+    // 后台编码任务。worker 在退出前把 finished 置位；回收方总是
+    // **先 join 再从列表移除**，因此任务对象不会在线程运行中被销毁。
+    struct TxEncodeJob {
+        std::thread worker;
+        std::atomic<bool> finished{false};
+    };
+
     // 合并配置：以右侧面板（设备/采样率/高级参数）为基础，用指定
     // 面板的调制设置（调制方式/FEC/档位/自动检测）覆盖调制字段。
     PipelineConfig surfaceConfig(const ModemSettingsWidget* modem) const;
@@ -122,8 +143,14 @@ private:
     size_t txPlaybackPos_;
     size_t txDataStart_;                    // index where data audio begins
     int txDrainTicks_;                      // ticks elapsed after last sample written
+    bool txDataPhaseAnnounced_;             // 数据阶段是否已向状态栏播报过一次
     // 本次发射来自电台面板还是发射面板：决定进度/状态回报到哪个面板
     bool txFromRadio_;
+    // 本次发射就是"[发送已停止]"通知本身：此时再点"停止发送"不重复通知
+    bool txStopNotice_;
+    // 本次发送是否已经真正上air（进入播放阶段）。编码阶段被取消时不向
+    // 对方发"发送已停止"——那时实际一个符号都没发出去。
+    bool txOnAir_;
 
     // 电台模式状态（监听切段 + 后台段解码）
     bool radioListening_;                   // 麦克风监听中
@@ -151,6 +178,10 @@ private:
     // TX WAV 后台导出：编码+写文件不阻塞 UI，防止旧回调串台
     std::thread* txExportThread_;
     std::atomic<int> txExportGen_;
+
+    // 发射后台编码（大文件调制耗时，必须离开 UI 线程）
+    std::vector<std::unique_ptr<TxEncodeJob>> txEncodeJobs_;
+    std::atomic<int> txEncodeGen_;   // 代号：不匹配的在途编码结果一律丢弃
 };
 
 } // namespace audiot

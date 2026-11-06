@@ -1,4 +1,4 @@
-// settings_dialog.cpp - Persistent settings panel (right-hand side)
+﻿// settings_dialog.cpp - Persistent settings panel (right-hand side)
 #include "settings_dialog.h"
 #include "modem_settings_widget.h"
 #include "app_config.h"
@@ -6,6 +6,8 @@
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QScrollArea>
+#include <QFrame>
 #include <QSettings>
 #include <QMessageBox>
 #include <QList>
@@ -32,20 +34,35 @@ SettingsDialog::SettingsDialog(AudioDeviceManager* deviceManager, QWidget* paren
     , updating_(false)
     , activeModem_(nullptr)
 {
-    setMinimumWidth(230);
+    setMinimumWidth(250);
     setupUI();
     loadSettings();
 }
 
 void SettingsDialog::setupUI()
 {
-    QVBoxLayout* mainLayout = new QVBoxLayout(this);
+    // 面板外层用滚动区包裹：窗口变矮时面板可滚动，不挤压任务区。
+    QVBoxLayout* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+
+    QScrollArea* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    outer->addWidget(scroll);
+
+    QWidget* content = new QWidget(scroll);
+    scroll->setWidget(content);
+    QVBoxLayout* mainLayout = new QVBoxLayout(content);
     mainLayout->setContentsMargins(2, 2, 2, 2);
+    mainLayout->setSpacing(6);
 
-    // --- Audio devices ---
-    QGroupBox* deviceGroup = new QGroupBox(QStringLiteral("音频设备"), this);
-    QFormLayout* deviceLayout = new QFormLayout(deviceGroup);
+    // ================= 一、音频设置（全局） =================
+    QGroupBox* deviceGroup = new QGroupBox(QStringLiteral("音频设置"), this);
+    QVBoxLayout* deviceOuter = new QVBoxLayout(deviceGroup);
+    deviceOuter->setSpacing(4);
 
+    QFormLayout* deviceLayout = new QFormLayout();
     comboInputDevice_ = new QComboBox(deviceGroup);
     comboOutputDevice_ = new QComboBox(deviceGroup);
     btnRefreshDevices_ = new QPushButton(QStringLiteral("刷新设备"), deviceGroup);
@@ -66,68 +83,107 @@ void SettingsDialog::setupUI()
     deviceLayout->addRow(QStringLiteral("输入设备:"), comboInputDevice_);
     deviceLayout->addRow(QStringLiteral("输出设备:"), comboOutputDevice_);
     deviceLayout->addRow(QString(), btnRefreshDevices_);
+    deviceOuter->addLayout(deviceLayout);
+
+    // 输入设备占用状态（默认空闲）：共享输入设备时给出明确提示
+    noteDevice_ = new QLabel(QStringLiteral("输入设备状态：空闲"), deviceGroup);
+    noteDevice_->setWordWrap(true);
+    noteDevice_->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
+    deviceOuter->addWidget(noteDevice_);
+
+    // 全局音频参数：直接展示（不再藏进折叠的"高级设置"）——
+    // 采样率与缓冲区是经常影响任务成败的设置。
+    QLabel* sepGlobal = new QLabel(QStringLiteral("全局音频参数（发射 / 接收 / 电台共用）"),
+                                   deviceGroup);
+    sepGlobal->setStyleSheet(QStringLiteral(
+        "color:#b0b0b0; font-weight:bold; padding-top:4px;"));
+    deviceOuter->addWidget(sepGlobal);
+
+    QFormLayout* globalLayout = new QFormLayout();
+    comboSampleRate_ = new QComboBox(deviceGroup);
+    comboSampleRate_->addItem(QStringLiteral("22050 Hz"), 22050);
+    comboSampleRate_->addItem(QStringLiteral("44100 Hz"), 44100);
+    comboSampleRate_->addItem(QStringLiteral("48000 Hz"), 48000);
+    comboSampleRate_->setCurrentIndex(1);
+    globalLayout->addRow(QStringLiteral("采样率:"), comboSampleRate_);
+
+    comboBufferSize_ = new QComboBox(deviceGroup);
+    comboBufferSize_->addItem(QStringLiteral("256 samples"), 256);
+    comboBufferSize_->addItem(QStringLiteral("512 samples"), 512);
+    comboBufferSize_->addItem(QStringLiteral("1024 samples"), 1024);
+    comboBufferSize_->addItem(QStringLiteral("2048 samples"), 2048);
+    comboBufferSize_->addItem(QStringLiteral("4096 samples"), 4096);
+    comboBufferSize_->setCurrentIndex(2);  // 1024 default
+    comboBufferSize_->setToolTip(QStringLiteral(
+        "缓冲区越小延迟越低，越大越能吸收抖动；出现爆音/卡顿时调大。"));
+    globalLayout->addRow(QStringLiteral("缓冲区:"), comboBufferSize_);
+    deviceOuter->addLayout(globalLayout);
+
+    noteGlobal_ = new QLabel(QStringLiteral(
+        "以上参数对所有任务生效，修改后影响后续操作；任务进行中不宜修改。"),
+        deviceGroup);
+    noteGlobal_->setWordWrap(true);
+    noteGlobal_->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
+    deviceOuter->addWidget(noteGlobal_);
+
+    // 全局参数改动即时保存
+    connect(comboSampleRate_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
+    connect(comboBufferSize_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SettingsDialog::saveSettings);
+
     mainLayout->addWidget(deviceGroup);
 
-    // --- Advanced / collapsible ---
-    // 调制方式、FEC、自动检测属于各收发选项卡（ModemSettingsWidget）；这里
-    // 只保留全局参数 + **跟随当前选项卡**的调制高级参数，避免同一组控件在
-    // 三个选项卡里重复出现。
-    advancedGroup_ = new QGroupBox(QStringLiteral("高级设置"), this);
-    advancedGroup_->setCheckable(true);
-    advancedGroup_->setChecked(false);  // collapsed by default
-    QFormLayout* advLayout = new QFormLayout(advancedGroup_);
+    // ================= 二、当前任务参数（跟随选项卡） =================
+    // 调制方式、FEC、自动检测在各收发选项卡自带的"调制参数"组里；这里只
+    // 摆**跟随当前选项卡**的调制高级参数，并明确标注它们的归属，避免用户
+    // 误以为改了全局设置。
+    taskGroup_ = new QGroupBox(QStringLiteral("当前任务参数"), this);
+    QVBoxLayout* taskOuter = new QVBoxLayout(taskGroup_);
+    taskOuter->setSpacing(4);
 
-    comboSampleRate_ = new QComboBox(advancedGroup_);
-    comboSampleRate_->addItem(QStringLiteral("22050"), 22050);
-    comboSampleRate_->addItem(QStringLiteral("44100"), 44100);
-    comboSampleRate_->addItem(QStringLiteral("48000"), 48000);
-    comboSampleRate_->setCurrentIndex(1);
-    advLayout->addRow(QStringLiteral("采样率:"), comboSampleRate_);
+    noteTask_ = new QLabel(taskGroup_);
+    noteTask_->setWordWrap(true);
+    noteTask_->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
+    taskOuter->addWidget(noteTask_);
 
-    comboBufferSize_ = new QComboBox(advancedGroup_);
-    comboBufferSize_->addItem(QStringLiteral("256"), 256);
-    comboBufferSize_->addItem(QStringLiteral("512"), 512);
-    comboBufferSize_->addItem(QStringLiteral("1024"), 1024);
-    comboBufferSize_->addItem(QStringLiteral("2048"), 2048);
-    comboBufferSize_->addItem(QStringLiteral("4096"), 4096);
-    comboBufferSize_->setCurrentIndex(2);  // 1024 default
-    advLayout->addRow(QStringLiteral("缓冲区大小:"), comboBufferSize_);
+    QFormLayout* advLayout = new QFormLayout();
 
     // AFSK 专用
-    spinMarkFreq_ = new QSpinBox(advancedGroup_);
+    spinMarkFreq_ = new QSpinBox(taskGroup_);
     spinMarkFreq_->setRange(300, 8000);
     spinMarkFreq_->setValue(1200);
     spinMarkFreq_->setSuffix(QStringLiteral(" Hz"));
     advLayout->addRow(QStringLiteral("Mark 频率:"), spinMarkFreq_);
 
-    spinSpaceFreq_ = new QSpinBox(advancedGroup_);
+    spinSpaceFreq_ = new QSpinBox(taskGroup_);
     spinSpaceFreq_->setRange(300, 8000);
     spinSpaceFreq_->setValue(2200);
     spinSpaceFreq_->setSuffix(QStringLiteral(" Hz"));
     advLayout->addRow(QStringLiteral("Space 频率:"), spinSpaceFreq_);
 
-    spinBaudRate_ = new QSpinBox(advancedGroup_);
+    spinBaudRate_ = new QSpinBox(taskGroup_);
     spinBaudRate_->setRange(100, 9600);
     spinBaudRate_->setValue(1200);
     spinBaudRate_->setSuffix(QStringLiteral(" bps"));
     advLayout->addRow(QStringLiteral("波特率:"), spinBaudRate_);
 
     // MFSK 专用
-    comboMftskTier_ = new QComboBox(advancedGroup_);
-    comboMftskTier_->addItem(QStringLiteral("稳健 (50/s)"), static_cast<int>(MftskTier::ROBUST));
-    comboMftskTier_->addItem(QStringLiteral("均衡 (100/s)"), static_cast<int>(MftskTier::BALANCED));
-    comboMftskTier_->addItem(QStringLiteral("高速 (150/s)"), static_cast<int>(MftskTier::SPORT));
+    comboMftskTier_ = new QComboBox(taskGroup_);
+    comboMftskTier_->addItem(QStringLiteral("稳健 (50 符号/s)"), static_cast<int>(MftskTier::ROBUST));
+    comboMftskTier_->addItem(QStringLiteral("均衡 (100 符号/s)"), static_cast<int>(MftskTier::BALANCED));
+    comboMftskTier_->addItem(QStringLiteral("高速 (150 符号/s)"), static_cast<int>(MftskTier::SPORT));
     advLayout->addRow(QStringLiteral("MFSK 档位:"), comboMftskTier_);
 
     // PSK 专用
-    comboPskOrder_ = new QComboBox(advancedGroup_);
+    comboPskOrder_ = new QComboBox(taskGroup_);
     comboPskOrder_->addItem(QStringLiteral("DBPSK (1 bit/符号)"), 1);
     comboPskOrder_->addItem(QStringLiteral("DQPSK (2 bit/符号)"), 2);
     comboPskOrder_->addItem(QStringLiteral("D8PSK (3 bit/符号)"), 3);
     advLayout->addRow(QStringLiteral("PSK 阶数:"), comboPskOrder_);
 
     // PSK / QAM 共用
-    comboPskQamRate_ = new QComboBox(advancedGroup_);
+    comboPskQamRate_ = new QComboBox(taskGroup_);
     comboPskQamRate_->addItem(QStringLiteral("稳健 (735 符号/s, 载波 1470 Hz)"),
                               static_cast<int>(PskQamRate::ROBUST));
     comboPskQamRate_->addItem(QStringLiteral("均衡 (1050 符号/s, 载波 2100 Hz)"),
@@ -136,11 +192,10 @@ void SettingsDialog::setupUI()
                               static_cast<int>(PskQamRate::SPORT));
     advLayout->addRow(QStringLiteral("PSK/QAM 档位:"), comboPskQamRate_);
 
-    // 全局参数改动即时保存；调制高级参数改动写回当前选项卡
-    connect(comboSampleRate_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-            this, &SettingsDialog::saveSettings);
-    connect(comboBufferSize_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
-            this, &SettingsDialog::saveSettings);
+    taskLayout_ = advLayout;
+    taskOuter->addLayout(advLayout);
+
+    // 调制高级参数改动写回当前选项卡
     connect(spinMarkFreq_, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SettingsDialog::onAdvancedChanged);
     connect(spinSpaceFreq_, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
@@ -154,14 +209,14 @@ void SettingsDialog::setupUI()
     connect(comboPskQamRate_, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &SettingsDialog::onAdvancedChanged);
 
-    mainLayout->addWidget(advancedGroup_);
+    mainLayout->addWidget(taskGroup_);
     mainLayout->addStretch();
 
     // 初始：无活动选项卡时隐藏全部调制高级项
     updateAdvancedVisibility();
 }
 
-void SettingsDialog::setActiveModem(ModemSettingsWidget* modem)
+void SettingsDialog::setActiveModem(ModemSettingsWidget* modem, const QString& taskName)
 {
     if (activeModem_) {
         disconnect(activeModem_, nullptr, this, nullptr);
@@ -172,8 +227,32 @@ void SettingsDialog::setActiveModem(ModemSettingsWidget* modem)
         connect(activeModem_, &ModemSettingsWidget::modemTypeChanged,
                 this, [this](int) { updateAdvancedVisibility(); });
     }
+    // 标题与说明明确标注参数归属：避免用户误以为改了全局设置
+    if (taskGroup_) {
+        taskGroup_->setTitle(taskName.isEmpty()
+            ? QStringLiteral("当前任务参数")
+            : QStringLiteral("当前任务参数（%1）").arg(taskName));
+    }
+    if (noteTask_) {
+        noteTask_->setText(taskName.isEmpty()
+            ? QStringLiteral("仅适用于当前任务。切换选项卡后显示对应任务的参数。")
+            : QStringLiteral("仅适用于“%1”任务；切换选项卡后显示对应任务的参数，"
+                             "与其他任务互不影响。").arg(taskName));
+    }
     refreshFromActiveModem();
     updateAdvancedVisibility();
+}
+
+void SettingsDialog::setInputDeviceBusy(const QString& byTask)
+{
+    if (!noteDevice_) return;
+    if (byTask.isEmpty()) {
+        noteDevice_->setText(QStringLiteral("输入设备状态：空闲"));
+        noteDevice_->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
+    } else {
+        noteDevice_->setText(QStringLiteral("输入设备状态：正被“%1”任务占用").arg(byTask));
+        noteDevice_->setStyleSheet(QStringLiteral("color:#ff7b72; font-size:11px;"));
+    }
 }
 
 void SettingsDialog::refreshFromActiveModem()
@@ -192,8 +271,7 @@ void SettingsDialog::refreshFromActiveModem()
 
 void SettingsDialog::updateAdvancedVisibility()
 {
-    if (!advancedGroup_) return;
-    QFormLayout* advLayout = qobject_cast<QFormLayout*>(advancedGroup_->layout());
+    QFormLayout* advLayout = taskLayout_;
     if (!advLayout) return;
 
     const int mt = activeModem_ ? activeModem_->modemTypeValue()

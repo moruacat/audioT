@@ -36,6 +36,17 @@
 namespace audiot {
 
 namespace {
+// 中止发送时向对方发出的系统通知文本
+const char* const kStopNoticeText = "[发送已停止]";
+
+// 人类可读的文件大小（聊天气泡里的文件次级说明）
+QString formatFileSize(qint64 bytes)
+{
+    if (bytes < 1024) return QStringLiteral("%1 B").arg(bytes);
+    if (bytes < 1024 * 1024)
+        return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
+}
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -52,7 +63,10 @@ MainWindow::MainWindow(QWidget* parent)
     , txPlaybackPos_(0)
     , txDataStart_(0)
     , txDrainTicks_(0)
+    , txDataPhaseAnnounced_(false)
     , txFromRadio_(false)
+    , txStopNotice_(false)
+    , txOnAir_(false)
     , radioListening_(false)
     , radioParseThread_(nullptr)
     , radioAborted_(false)
@@ -68,6 +82,7 @@ MainWindow::MainWindow(QWidget* parent)
     , rxParseGen_(0)
     , txExportThread_(nullptr)
     , txExportGen_(0)
+    , txEncodeGen_(0)
 {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app-logo.svg")));
     setWindowTitle(QStringLiteral("AudioT - 音频数据通信"));
@@ -97,9 +112,11 @@ MainWindow::MainWindow(QWidget* parent)
         if (txPanel_) txPanel_->loadPanelSettings();
         if (rxPanel_) rxPanel_->loadPanelSettings();
         if (radioPanel_) radioPanel_->loadPanelSettings();
-        // 调制设置载入后刷新右侧"高级设置"面板（初始选项卡为"发射"）
+        // 调制设置载入后刷新右侧"当前任务参数"面板（初始选项卡为"发射"）
         if (settingsDialog_) {
-            settingsDialog_->setActiveModem(txPanel_ ? txPanel_->modemSettings() : nullptr);
+            settingsDialog_->setActiveModem(
+                txPanel_ ? txPanel_->modemSettings() : nullptr,
+                tabWidget_ ? tabWidget_->tabText(0) : QString());
         }
         // 应用设备选择（原"工具→设置"入口逻辑，菜单已移除）
         onSettings();
@@ -136,6 +153,14 @@ MainWindow::~MainWindow()
         txExportThread_->join();
         delete txExportThread_;
     }
+    // 等待后台编码线程结束（此时 QObject 尚未析构，投递的事件还会被
+    // 正常清理；join 之后再析构就不会有悬空回调）
+    for (auto& job : txEncodeJobs_) {
+        if (job->worker.joinable()) {
+            job->worker.join();
+        }
+    }
+    txEncodeJobs_.clear();
     if (audioInput_->isRunning()) {
         audioInput_->stop();
     }
@@ -237,16 +262,16 @@ void MainWindow::connectSignals()
     connect(settingsDialog_, &SettingsDialog::devicesChanged,
             this, &MainWindow::onSettings);
 
-    // 右侧"高级设置"跟随当前收发选项卡：切到哪个选项卡，就显示/编辑
-    // 那个选项卡的调制高级参数（并按其调制方式显隐）
+    // 右侧"当前任务参数"跟随当前收发选项卡：切到哪个选项卡，就显示/编辑
+    // 那个选项卡的调制高级参数（并按其调制方式显隐），标题也标出任务归属
     connect(tabWidget_, &QTabWidget::currentChanged, this, [this](int idx) {
         ModemSettingsWidget* m = nullptr;
         if (idx == 0) m = txPanel_->modemSettings();
         else if (idx == 1) m = rxPanel_->modemSettings();
         else if (idx == 2) m = radioPanel_->modemSettings();
-        settingsDialog_->setActiveModem(m);
+        settingsDialog_->setActiveModem(m, tabWidget_->tabText(idx));
     });
-    settingsDialog_->setActiveModem(txPanel_->modemSettings());
+    settingsDialog_->setActiveModem(txPanel_->modemSettings(), tabWidget_->tabText(0));
 
     // Audio input callback -> waveform display + radio/rx-mic segmenting
     audioInput_->setCallback([this](const float* samples, int count) {
@@ -305,29 +330,126 @@ void MainWindow::onAbout()
 
 void MainWindow::onStartTransmission(const QString& textOrFile)
 {
+    startTransmissionAsync(textOrFile, false, false);
+}
+
+void MainWindow::reapEncodeJobs()
+{
+    // 只回收已经跑完（finished）的任务：join 立即返回，不阻塞 UI；
+    // 仍在编码的留在列表里，等下次回收或析构时再处理。
+    for (auto it = txEncodeJobs_.begin(); it != txEncodeJobs_.end();) {
+        if ((*it)->finished.load()) {
+            if ((*it)->worker.joinable()) {
+                (*it)->worker.join();
+            }
+            it = txEncodeJobs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MainWindow::cancelPendingEncode()
+{
+    // 代号自增后，在途编码线程投递回来的结果会被判定为过期而丢弃
+    ++txEncodeGen_;
+}
+
+void MainWindow::startTransmissionAsync(const QString& textOrFile, bool fromRadio,
+                                        bool echoLocal)
+{
     // Abort any in-flight playback before starting a new one
     if (txPlaybackTimer_->isActive() || audioOutput_->isRunning()) {
         finishTxPlayback(true);
     }
+    cancelPendingEncode();
+    reapEncodeJobs();
 
-    config_ = surfaceConfig(txPanel_->modemSettings());
-    txFromRadio_ = false;   // 本次发射来自发射面板
-    statusBar()->showMessage(QStringLiteral("开始发射..."));
+    txFromRadio_ = fromRadio;     // 进度/状态回报到哪个面板
+    txStopNotice_ = false;
+    config_ = fromRadio ? surfaceConfig(radioPanel_->modemSettings())
+                        : surfaceConfig(txPanel_->modemSettings());
 
-    // Encode text -> modulated audio samples (fast, pure CPU work)
-    std::vector<float> dataSamples;
-    QString err;
-    if (!encodeTxInput(textOrFile, config_, dataSamples, err)) {
-        txPanel_->onTransmissionStatus(QStringLiteral("失败: ") + err);
-        statusBar()->showMessage(QStringLiteral("发射失败"), 5000);
-        return;
+    // 立即进入"编码中"状态：面板立刻锁住，用户不会重复触发，也能看到
+    // 一条明确的进行中提示（编码期间 UI 依旧完全可响应）。
+    if (fromRadio) {
+        radioPanel_->setSending(true);
+        radioPanel_->setSendPhase(QStringLiteral("编码中..."));
+        radioPanel_->setSendProgress(-1);    // 忙碌动画
+    } else {
+        txPanel_->onTransmissionProgress(0);
+        txPanel_->onTransmissionStatus(QStringLiteral("编码中..."));
+        statusBar()->showMessage(QStringLiteral("正在编码，请稍候..."));
     }
 
-    // Real-time playback to the speaker: prep tone first, then data audio
-    if (!beginTxPlayback(dataSamples)) {
-        txPanel_->onTransmissionStatus(QStringLiteral("失败: 无法启动音频输出"));
-        statusBar()->showMessage(QStringLiteral("发射失败: 音频输出启动失败"), 5000);
-    }
+    const PipelineConfig cfg = config_;
+    const int gen = txEncodeGen_.load();
+
+    auto job = std::unique_ptr<TxEncodeJob>(new TxEncodeJob());
+    TxEncodeJob* raw = job.get();
+    txEncodeJobs_.push_back(std::move(job));
+
+    // 编码在后台线程：调制大文件要生成上千万个样本，放 UI 线程会让
+    // 界面"未响应"。编码本身不碰任何 UI 状态（纯 CPU + 文件读取）。
+    raw->worker = std::thread([this, textOrFile, cfg, gen, fromRadio, echoLocal, raw]() {
+        auto samples = std::make_shared<std::vector<float>>();
+        QString err;
+        const bool ok = encodeTxInput(textOrFile, cfg, *samples, err);
+        if (!ok) {
+            samples->clear();
+        }
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, gen, ok, err, samples, textOrFile, fromRadio, echoLocal]() {
+                reapEncodeJobs();
+                // 已被停止或被新的发射取代：直接丢弃本次结果
+                if (gen != txEncodeGen_.load()) {
+                    return;
+                }
+                if (!ok) {
+                    statusBar()->showMessage(QStringLiteral("发射失败"), 5000);
+                    if (fromRadio) {
+                        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+                            QStringLiteral("发送失败: ") + err);
+                        radioPanel_->setSending(false);
+                    } else {
+                        txPanel_->onTransmissionStatus(QStringLiteral("失败: ") + err);
+                    }
+                    return;
+                }
+                if (!beginTxPlayback(*samples)) {
+                    statusBar()->showMessage(QStringLiteral("发射失败: 音频输出启动失败"), 5000);
+                    if (fromRadio) {
+                        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+                            QStringLiteral("发送失败: 无法启动音频输出"));
+                        radioPanel_->setSending(false);
+                    } else {
+                        txPanel_->onTransmissionStatus(
+                            QStringLiteral("失败: 无法启动音频输出"));
+                    }
+                    return;
+                }
+                if (echoLocal) {
+                    // 自己的消息上屏：文件用可点击链接气泡，文本用普通气泡
+                    const bool isFile = textOrFile.contains(QStringLiteral(".")) &&
+                        (textOrFile.contains(QStringLiteral("/")) ||
+                         textOrFile.contains(QStringLiteral("\\")));
+                    if (isFile) {
+                        const QFileInfo info(textOrFile);
+                        radioPanel_->appendFileMessage(RadioPanel::MSG_SEND,
+                            info.fileName(), textOrFile,
+                            QStringLiteral("%1 · 本机文件，正在通过音频链路发送")
+                                .arg(formatFileSize(info.size())));
+                    } else {
+                        radioPanel_->appendMessage(RadioPanel::MSG_SEND, textOrFile);
+                    }
+                }
+            },
+            Qt::QueuedConnection);
+
+        raw->finished = true;   // 之后本线程不再触碰任何共享状态
+    });
 }
 
 bool MainWindow::encodeTxInput(const QString& textOrFile, const PipelineConfig& config,
@@ -546,6 +668,8 @@ bool MainWindow::beginTxPlayback(const std::vector<float>& dataSamples,
     }
     txPlaybackPos_ = 0;
     txDrainTicks_ = 0;
+    txDataPhaseAnnounced_ = !withPrepTone;
+    txOnAir_ = true;   // 已真正进入播放阶段（编码阶段为 false）
 
     // 16-bit mono push-mode output。缓冲加大到 8192 样本（~186ms）：
     // qtaudio_windows 的 bytesFree() 按 period 量化（见 onTxPlaybackTick
@@ -582,11 +706,13 @@ bool MainWindow::beginTxPlayback(const std::vector<float>& dataSamples,
             ? QStringLiteral("准备音中...")
             : QStringLiteral("发射中..."));
     }
+    // 状态分工：状态栏只播报"阶段事件"（开始/进入数据段），持续的进度与
+    // 阶段文字留给任务面板，避免两处显示同一句话。
     statusBar()->showMessage(withPrepTone
-        ? (QStringLiteral("准备音中... (") +
+        ? (QStringLiteral("发射已开始，") +
            QString::number(static_cast<double>(config_.prepToneSeconds), 'f', 0) +
-           QStringLiteral(" 秒后发送数据)"))
-        : QStringLiteral("发射中..."));
+           QStringLiteral(" 秒准备音后发送数据"))
+        : QStringLiteral("数据发射已开始"));
 
     // Pace the writes: ~20ms ticks, each tick fills whatever the
     // QAudioOutput buffer currently has free. Never dumps all samples at
@@ -620,9 +746,11 @@ void MainWindow::onTxPlaybackTick()
 
         // Phase-aware status + overall progress
         const bool inPrep = txPlaybackPos_ < txDataStart_;
-        statusBar()->showMessage(inPrep
-            ? QStringLiteral("准备音中...")
-            : QStringLiteral("发射中..."));
+        if (!inPrep && !txDataPhaseAnnounced_) {
+            // 进入数据段：状态栏只在此播报一次
+            txDataPhaseAnnounced_ = true;
+            statusBar()->showMessage(QStringLiteral("数据发射已开始"));
+        }
         if (total > 0) {
             const int pct = static_cast<int>(txPlaybackPos_ * 100 / total);
             if (txFromRadio_) {
@@ -666,6 +794,7 @@ void MainWindow::finishTxPlayback(bool aborted)
     txPlaybackPos_ = 0;
     txDataStart_ = 0;
     txDrainTicks_ = 0;
+    txOnAir_ = false;
 
     if (audioOutput_->isRunning()) {
         audioOutput_->stop();
@@ -691,7 +820,9 @@ void MainWindow::finishTxPlayback(bool aborted)
 
 void MainWindow::onStopTransmission()
 {
-    // Interruptible at any moment: stop pacing timer + audio output
+    // Interruptible at any moment: cancel a pending background encode,
+    // stop the pacing timer + audio output
+    cancelPendingEncode();
     finishTxPlayback(true);
 }
 
@@ -699,10 +830,13 @@ void MainWindow::onStartReceiving(const QString& wavPath)
 {
     if (wavPath.isEmpty()) {
         // 麦克风实时模式：能量门控切段 + 后台段解码（与电台复用）
+        // 与电台监听互斥（共享输入设备）：自动停止电台侧并明确告知。
         if (radioListening_) {
             onRadioStopListening();
+            radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+                QStringLiteral("输入设备被接收任务占用，已停止电台监听"));
         }
-    config_ = surfaceConfig(rxPanel_->modemSettings());
+        config_ = surfaceConfig(rxPanel_->modemSettings());
 
         // 回收上一次未结束的段解码线程（若有）
         rxMicAborted_ = true;
@@ -732,7 +866,8 @@ void MainWindow::onStartReceiving(const QString& wavPath)
         rxPanel_->clearReceived();
         rxPanel_->onReceiveProgress(-1);   // 不确定进度（忙碌动画）
         rxPanel_->onReceiveStatus(QStringLiteral("监听中..."));
-        statusBar()->showMessage(QStringLiteral("麦克风监听中..."));
+        statusBar()->showMessage(QStringLiteral("麦克风监听已开始"));
+        if (settingsDialog_) settingsDialog_->setInputDeviceBusy(QStringLiteral("接收"));
         return;
     }
 
@@ -742,7 +877,7 @@ void MainWindow::onStartReceiving(const QString& wavPath)
     rxPanel_->clearReceived();
     rxPanel_->onReceiveProgress(0);
     rxPanel_->onReceiveStatus(QStringLiteral("解析中..."));
-    statusBar()->showMessage(QStringLiteral("解析 WAV 文件..."));
+    statusBar()->showMessage(QStringLiteral("已开始解析 WAV 文件"));
 
     // 回收上一次未结束的解析线程（若用户连续解析）
     rxParseAborted_ = true;
@@ -889,10 +1024,13 @@ void MainWindow::onStopReceiving()
 
 void MainWindow::onRadioStartListening()
 {
-    // 接收面板麦克风监听与电台监听互斥（共享同一输入设备）
+    // 接收面板麦克风监听与电台监听互斥（共享同一输入设备）：
+    // 自动停止接收侧并明确告知，避免两个任务都显示"监听中"却只有一个
+    // 真正在收数据。
     if (rxMicListening_) {
         stopRxMicListening();
-        rxPanel_->onReceiveStatus(QStringLiteral("已停止"));
+        rxPanel_->onReceiveStatus(QStringLiteral(
+            "已停止：输入设备被电台监听占用"));
     }
 
     config_ = surfaceConfig(radioPanel_->modemSettings());
@@ -926,7 +1064,8 @@ void MainWindow::onRadioStartListening()
 
     radioPanel_->appendMessage(RadioPanel::MSG_INFO, QStringLiteral("开始监听..."));
     radioPanel_->setListening(true);
-    statusBar()->showMessage(QStringLiteral("电台监听中..."));
+    statusBar()->showMessage(QStringLiteral("电台监听已开始"));
+    if (settingsDialog_) settingsDialog_->setInputDeviceBusy(QStringLiteral("电台"));
 }
 
 void MainWindow::onRadioStopListening()
@@ -950,52 +1089,85 @@ void MainWindow::onRadioStopListening()
     radioPanel_->appendMessage(RadioPanel::MSG_INFO, QStringLiteral("停止监听"));
     radioPanel_->setListening(false);
     statusBar()->showMessage(QStringLiteral("电台监听已停止"), 5000);
+    if (settingsDialog_ && !rxMicListening_) {
+        settingsDialog_->setInputDeviceBusy(QString());
+    }
 }
 
 void MainWindow::onRadioSend(const QString& textOrFile)
 {
-    // 与发射面板共用编码+播放链路；发射前中止当前播放（如有）
+    sendRadioPayload(textOrFile, true);
+}
+
+bool MainWindow::sendRadioPayload(const QString& textOrFile, bool echoLocal)
+{
+    if (echoLocal) {
+        // 普通电台消息：编码放后台线程，大文件也不会冻结界面
+        startTransmissionAsync(textOrFile, true, true);
+        return true;
+    }
+
+    // 系统通知（"[发送已停止]"）：文本极短，同步编码即可；而且调用方
+    // 需要立刻拿到"到底有没有发出去"的结果，不能异步。
     if (txPlaybackTimer_->isActive() || audioOutput_->isRunning()) {
         finishTxPlayback(true);
     }
-
-    txFromRadio_ = true;   // 本次发射来自电台面板
+    txFromRadio_ = true;     // 本次发射来自电台面板
+    txStopNotice_ = true;    // 本次就是停止通知本身
     config_ = surfaceConfig(radioPanel_->modemSettings());
     std::vector<float> dataSamples;
     QString err;
     if (!encodeTxInput(textOrFile, config_, dataSamples, err)) {
         radioPanel_->appendMessage(RadioPanel::MSG_INFO,
                                    QStringLiteral("发送失败: ") + err);
-        return;
+        return false;
     }
     if (!beginTxPlayback(dataSamples)) {
         radioPanel_->appendMessage(RadioPanel::MSG_INFO,
                                    QStringLiteral("发送失败: 无法启动音频输出"));
-        return;
+        return false;
     }
-
-    // 自己的消息上屏：文件用可点击链接气泡，文本用普通气泡
-    const bool isFile = textOrFile.contains(QStringLiteral(".")) &&
-                        (textOrFile.contains(QStringLiteral("/")) ||
-                         textOrFile.contains(QStringLiteral("\\")));
-    if (isFile) {
-        radioPanel_->appendFileMessage(RadioPanel::MSG_SEND,
-            QFileInfo(textOrFile).fileName(), textOrFile);
-    } else {
-        radioPanel_->appendMessage(RadioPanel::MSG_SEND, textOrFile);
-    }
+    return true;
 }
 
 void MainWindow::onRadioStopSend()
 {
-    // 发送中点击"停止"（面板已二次确认）：中止发射，并给对方发一条
-    // 「停止消息」，让正在收听的对方知道发送已中止。
+    // 发送中点击"停止发送"（面板内已按风险确认）：中止发射，并尝试向
+    // 对方发一条「发送已停止」通知。注意"本机停止成功"与"对方收到通知"
+    // 是两个不同的结果——通知本身也是一次传输，信道断了就可能发不出去，
+    // 发不出去时必须明确告知本机用户，不能假装对方已收到。
     const bool wasRadio = txFromRadio_;
+    const bool wasStopNotice = txStopNotice_;
+    const bool wasOnAir = txOnAir_;       // 是否已经真正播放过（编码阶段为 false）
+    cancelPendingEncode();                // 在途编码结果作废
     if (txPlaybackTimer_->isActive() || audioOutput_->isRunning()) {
         finishTxPlayback(true);
     }
-    if (wasRadio) {
-        onRadioSend(QStringLiteral("[发送已停止]"));
+    if (!wasRadio) {
+        return;
+    }
+    if (!wasOnAir) {
+        // 还在编码阶段就被取消：实际一个符号都没发出去，无需（也不应）
+        // 通知对方
+        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+            QStringLiteral("已取消发送（尚未开始发射，未向对方发出任何内容）"));
+        return;
+    }
+    if (wasStopNotice) {
+        // 用户中止了"停止通知"本身：通知也是一次传输，中止后对方就可能
+        // 收不到，必须如实告知本机用户
+        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+            QStringLiteral("已中止“发送已停止”通知，对方可能仍在等待"));
+        return;
+    }
+    const bool notified = sendRadioPayload(QLatin1String(kStopNoticeText), false);
+    if (notified) {
+        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+            QStringLiteral("已停止发送，并向对方发送了“发送已停止”通知"));
+    } else {
+        radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+            QStringLiteral("本机已停止发送，但“发送已停止”通知未能发出，"
+                           "对方可能仍在等待"));
     }
 }
 
@@ -1100,9 +1272,10 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
     if (result.type == DecodeResult::TEXT) {
         radioPanel_->appendMessage(RadioPanel::MSG_RECV,
             QString::fromUtf8(result.text.c_str()));
+        statusBar()->showMessage(QStringLiteral("收到电台消息"), 5000);
     } else {
         // 文件/图片/视频：保存到系统「下载」目录（聊天软件风格），并在聊天
-        // 界面显示为可点击的文件气泡（点击用系统默认程序打开）。
+        // 界面显示为可点击的文件气泡（点击文件名用系统默认程序打开）。
         const QString kind = (result.type == DecodeResult::IMAGE) ? QStringLiteral("图片")
                            : (result.type == DecodeResult::VIDEO) ? QStringLiteral("视频")
                                                                   : QStringLiteral("文件");
@@ -1110,21 +1283,59 @@ void MainWindow::presentRadioResult(const DecodeResult& result)
         if (dir.isEmpty()) {
             dir = QCoreApplication::applicationDirPath() + QStringLiteral("/接收文件");
         }
-        QDir().mkpath(dir);
-        const QString fileName = QString::fromUtf8(result.filename.c_str());
-        const QString savePath = dir + QLatin1Char('/') + fileName;
+        if (!QDir().mkpath(dir)) {
+            radioPanel_->appendMessage(RadioPanel::MSG_INFO,
+                kind + QStringLiteral("接收失败：无法创建保存目录 ") + dir);
+            statusBar()->showMessage(QStringLiteral("接收到") + kind +
+                                     QStringLiteral("但保存失败"), 5000);
+            return;
+        }
+
+        // 文件名净化：只取文件名部分，防止帧内名字携带路径成分写到目录外
+        QString fileName = QFileInfo(QString::fromUtf8(result.filename.c_str())).fileName();
+        if (fileName.isEmpty()) {
+            fileName = QStringLiteral("received.bin");
+        }
+        // 同名冲突：自动追加序号，不覆盖下载目录里已有的同名文件
+        QString savePath = dir + QLatin1Char('/') + fileName;
+        if (QFileInfo::exists(savePath)) {
+            const QFileInfo fi(fileName);
+            const QString base = fi.completeBaseName();
+            const QString suffix = fi.suffix();
+            for (int i = 1; i < 10000; ++i) {
+                QString candidate = dir + QLatin1Char('/') + base +
+                    QStringLiteral(" (%1)").arg(i) +
+                    (suffix.isEmpty() ? QString()
+                                      : QLatin1Char('.') + suffix);
+                if (!QFileInfo::exists(candidate)) {
+                    savePath = candidate;
+                    break;
+                }
+            }
+        }
+
         QFile file(savePath);
         if (file.open(QIODevice::WriteOnly)) {
             file.write(reinterpret_cast<const char*>(result.fileData.data()),
                        static_cast<qint64>(result.fileData.size()));
             file.close();
-            radioPanel_->appendFileMessage(RadioPanel::MSG_RECV, fileName, savePath);
+            radioPanel_->appendFileMessage(
+                RadioPanel::MSG_RECV, QFileInfo(savePath).fileName(), savePath,
+                QStringLiteral("%1 · 已保存到 %2")
+                    .arg(formatFileSize(static_cast<qint64>(result.fileData.size())),
+                         QDir(dir).dirName()));
+            statusBar()->showMessage(kind + QStringLiteral("已保存到 ") + dir, 5000);
         } else {
+            // 保存失败（权限不足 / 磁盘满等）：明确告知原因，并且**不**提供
+            // 可打开的入口（此时磁盘上并没有这个文件）
+            const QString reason = file.errorString();
             radioPanel_->appendMessage(RadioPanel::MSG_INFO,
-                kind + QStringLiteral("保存失败: ") + savePath);
+                kind + QStringLiteral("接收失败：无法保存到 ") + savePath +
+                QStringLiteral("（") + reason + QStringLiteral("）"));
+            statusBar()->showMessage(QStringLiteral("接收到") + kind +
+                                     QStringLiteral("但保存失败"), 5000);
         }
     }
-    statusBar()->showMessage(QStringLiteral("收到电台消息"), 5000);
 }
 
 void MainWindow::accumulateRxMic(const float* samples, int count)
@@ -1202,6 +1413,10 @@ void MainWindow::stopRxMicListening()
     rxMicSeg_.buffer.clear();
     rxMicSeg_.signalSeen = false;
     rxMicSeg_.quietSamples = 0;
+
+    if (settingsDialog_ && !radioListening_) {
+        settingsDialog_->setInputDeviceBusy(QString());
+    }
 }
 
 

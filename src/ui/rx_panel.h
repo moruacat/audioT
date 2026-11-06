@@ -64,6 +64,7 @@ private:
     QStackedWidget* recvStack_;
     QTextEdit* receivedText_;
     QLineEdit* savePath_;
+    QPushButton* btnClear_;      // 清空结果（仅清除显示内容，不影响磁盘文件）
 
     // Control
     QPushButton* btnStart_;

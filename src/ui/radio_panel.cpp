@@ -14,12 +14,45 @@
 #include <QMessageBox>
 #include <QDir>
 #include <QUrl>
+#include <QFileInfo>
+#include <QDesktopServices>
+#include <QHBoxLayout>
+#include <QLayoutItem>
+#include <QMouseEvent>
+
+#include <functional>
 
 namespace audiot {
+
+namespace {
+// 人类可读的文件大小（用于发送文件前的确认提示与聊天气泡）
+QString formatFileSize(qint64 bytes)
+{
+    if (bytes < 1024) return QStringLiteral("%1 B").arg(bytes);
+    if (bytes < 1024 * 1024)
+        return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
+}
+
+// 可点击的气泡框架：点击（非子控件链接区域）回调 onClick，
+// 用于"点击消息气泡查看文件详情"。
+class ClickableFrame : public QFrame {
+public:
+    std::function<void()> onClick;
+protected:
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        if (onClick) onClick();
+        QFrame::mousePressEvent(e);
+    }
+};
+} // namespace
 
 RadioPanel::RadioPanel(QWidget* parent)
     : QWidget(parent)
     , sending_(false)
+    , sendingIsFile_(false)
+    , lastSendPercent_(-1)
     , modemSettings_(nullptr)
 {
     setupUI();
@@ -65,15 +98,20 @@ void RadioPanel::setupUI()
     hintLabel_ = new QLabel(QStringLiteral(
         "电台消息将显示在此（文本 / 文件 / 系统信息）..."), chatLog_);
     hintLabel_->setAlignment(Qt::AlignCenter);
-    hintLabel_->setStyleSheet(QStringLiteral("color:#9a9a9a;"));
+    // 必须允许换行：否则文本单行宽度可能超过视口，居中对齐看起来会像
+    // 左上对齐并且溢出窗口
+    hintLabel_->setWordWrap(true);
+    hintLabel_->setStyleSheet(QStringLiteral("color:#9a9a9a; background:transparent;"));
     hintLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    relayoutHint();
 
     // --- 输入行 ---
     QHBoxLayout* inputLayout = new QHBoxLayout();
     inputLine_ = new QLineEdit(this);
     inputLine_->setPlaceholderText(QStringLiteral("输入要发送的消息，回车或点发送"));
-    btnFile_ = new QPushButton(QStringLiteral("发送文件..."), this);
+    btnFile_ = new QPushButton(QStringLiteral("发送文件…"), this);
     btnSend_ = new QPushButton(QStringLiteral("发送"), this);
+    btnSend_->setProperty("primary", true);   // 主色按钮（主题 QSS 识别）
     inputLayout->addWidget(inputLine_, 1);
     inputLayout->addWidget(btnFile_);
     inputLayout->addWidget(btnSend_);
@@ -82,7 +120,9 @@ void RadioPanel::setupUI()
     // --- 控制行 ---
     QHBoxLayout* ctlLayout = new QHBoxLayout();
     btnListen_ = new QPushButton(QStringLiteral("开始监听"), this);
+    btnListen_->setProperty("primary", true);  // 主色按钮（主题 QSS 识别）
     btnStop_ = new QPushButton(QStringLiteral("停止监听"), this);
+    btnStop_->setProperty("danger", true);     // 停止类按钮用危险色文字
     btnStop_->setEnabled(false);
     labelStatus_ = new QLabel(QStringLiteral("未监听"), this);
     ctlLayout->addWidget(btnListen_);
@@ -114,12 +154,27 @@ void RadioPanel::setupUI()
     });
 }
 
+void RadioPanel::relayoutHint()
+{
+    if (!hintLabel_ || !chatLog_) return;
+    // 提示层是聊天列表的子控件：坐标用 viewport 在其父坐标系中的矩形，
+    // 这样提示正好铺满可视区（含边框偏移），不会超出窗口
+    hintLabel_->setGeometry(chatLog_->viewport()->geometry());
+    hintLabel_->raise();
+}
+
 void RadioPanel::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (hintLabel_) {
-        hintLabel_->setGeometry(chatLog_->viewport()->geometry());
-    }
+    relayoutHint();
+}
+
+void RadioPanel::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // 首次切到电台页时 resizeEvent 可能尚未触发，这里补一次，
+    // 避免提示层停留在默认几何（表现为左上对齐且溢出）
+    relayoutHint();
 }
 
 QString RadioPanel::timestamp()
@@ -158,9 +213,11 @@ QWidget* RadioPanel::createBubble(int kind, const QString& text, const QString& 
                                    : QStringLiteral("#1a1a1a");
 
     QWidget* outer = new QWidget;
-    QVBoxLayout* vLayout = new QVBoxLayout(outer);
-    vLayout->setContentsMargins(0, 0, 0, 0);
-    vLayout->setSpacing(2);
+    // 时间戳与气泡旁置、组成一个整体（不再让时间戳单独占一行）；
+    // 窄窗口下整块仍可随气泡一起换行显示，可读性优先。
+    QHBoxLayout* hLayout = new QHBoxLayout(outer);
+    hLayout->setContentsMargins(0, 0, 0, 0);
+    hLayout->setSpacing(6);
 
     QLabel* tsLabel = new QLabel(ts);
     tsLabel->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
@@ -197,76 +254,135 @@ QWidget* RadioPanel::createBubble(int kind, const QString& text, const QString& 
     bubble->setFixedSize(bubbleW, bubbleH);
 
     if (mine) {
-        // 己方：整体靠右，时间戳在气泡上方右对齐
-        tsLabel->setAlignment(Qt::AlignRight);
-        vLayout->addWidget(tsLabel);
-        vLayout->addWidget(bubble, 0, Qt::AlignRight);
+        // 己方：气泡靠右，时间戳紧邻气泡左侧
+        hLayout->addStretch();
+        hLayout->addWidget(tsLabel, 0, Qt::AlignBottom);
+        hLayout->addWidget(bubble);
     } else {
-        // 对方：整体靠左
-        tsLabel->setAlignment(Qt::AlignLeft);
-        vLayout->addWidget(tsLabel);
-        vLayout->addWidget(bubble, 0, Qt::AlignLeft);
+        // 对方：气泡靠左，时间戳紧邻气泡右侧
+        hLayout->addWidget(bubble);
+        hLayout->addWidget(tsLabel, 0, Qt::AlignBottom);
+        hLayout->addStretch();
     }
     return outer;
 }
 
 void RadioPanel::appendFileMessage(int kind, const QString& displayName,
-                                   const QString& filePath)
+                                   const QString& filePath, const QString& note)
 {
     hintLabel_->hide();
     QListWidgetItem* item = new QListWidgetItem(chatLog_);
-    QWidget* bubble = createFileBubble(kind, displayName, filePath, timestamp());
+    QWidget* bubble = createFileBubble(kind, displayName, filePath, note, timestamp());
     item->setSizeHint(bubble->sizeHint());
     chatLog_->setItemWidget(item, bubble);
     chatLog_->scrollToBottom();
 }
 
 QWidget* RadioPanel::createFileBubble(int kind, const QString& name,
-                                      const QString& path, const QString& ts)
+                                      const QString& path, const QString& note,
+                                      const QString& ts)
 {
-    // 文件消息气泡：文件名是可点击链接，点击用系统默认程序打开（而非纯文本）
+    // 文件消息气泡：两个动作分开——
+    //   点击文件名 -> 用系统默认程序打开本地文件
+    //   点击气泡其余区域 -> 查看文件消息详情
     const bool mine = (kind == MSG_SEND);
     const QString bgColor = mine ? QStringLiteral("#95EC69")
                                  : QStringLiteral("#F0F0F0");
+    const bool openable = !path.isEmpty();
 
     QWidget* outer = new QWidget;
-    QVBoxLayout* vLayout = new QVBoxLayout(outer);
-    vLayout->setContentsMargins(0, 0, 0, 0);
-    vLayout->setSpacing(2);
+    QHBoxLayout* hLayout = new QHBoxLayout(outer);
+    hLayout->setContentsMargins(0, 0, 0, 0);
+    hLayout->setSpacing(6);
 
     QLabel* tsLabel = new QLabel(ts);
     tsLabel->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
 
-    QLabel* msgLabel = new QLabel;
-    msgLabel->setTextFormat(Qt::RichText);
-    const QString url = QUrl::fromLocalFile(path).toString();
-    msgLabel->setText(QStringLiteral("📎 <a href=\"%1\">%2</a>")
-                          .arg(url, name.toHtmlEscaped()));
-    msgLabel->setOpenExternalLinks(true);   // 点击交给系统默认程序打开
-    msgLabel->setToolTip(path);
-    msgLabel->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    msgLabel->setStyleSheet(QStringLiteral("color:#1a1a1a;"));
-
-    QFrame* bubble = new QFrame;
+    ClickableFrame* bubble = new ClickableFrame;
     bubble->setStyleSheet(QStringLiteral(
         "QFrame { background:%1; border-radius:%2px; }")
         .arg(bgColor).arg(kBubbleRadius));
-    QHBoxLayout* bLayout = new QHBoxLayout(bubble);
+    QVBoxLayout* bLayout = new QVBoxLayout(bubble);
     bLayout->setContentsMargins(kBubblePadX / 2, kBubblePadY / 2,
                                 kBubblePadX / 2, kBubblePadY / 2);
-    bLayout->addWidget(msgLabel);
+    bLayout->setSpacing(2);
+
+    // 文件名：可点击文本（未能保存时不提供打开入口，避免点了打不开）
+    QLabel* nameLabel = new QLabel(bubble);
+    if (openable) {
+        nameLabel->setTextFormat(Qt::RichText);
+        nameLabel->setText(QStringLiteral("📎 <a href=\"open\">%1</a>")
+                               .arg(name.toHtmlEscaped()));
+        nameLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+        nameLabel->setCursor(Qt::PointingHandCursor);
+        nameLabel->setToolTip(QStringLiteral("点击打开：%1").arg(path));
+        connect(nameLabel, &QLabel::linkActivated, this,
+                [this, path, name]() { openLocalFile(path, name); });
+    } else {
+        nameLabel->setText(QStringLiteral("📎 %1").arg(name.toHtmlEscaped()));
+        nameLabel->setTextFormat(Qt::PlainText);
+        nameLabel->setWordWrap(true);
+    }
+    bLayout->addWidget(nameLabel);
+
+    // 次级说明行：文件大小 / 保存状态 / 失败原因
+    if (!note.isEmpty()) {
+        QLabel* noteLabel = new QLabel(note, bubble);
+        noteLabel->setWordWrap(true);
+        noteLabel->setStyleSheet(QStringLiteral("color:#9a9a9a; font-size:11px;"));
+        bLayout->addWidget(noteLabel);
+    }
+
     bubble->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
 
+    // 点击气泡其余区域：查看文件消息详情
+    const QString detailPath = path;
+    const QString detailName = name;
+    const QString detailNote = note;
+    bubble->onClick = [this, detailName, detailPath, detailNote, mine]() {
+        QString info = QStringLiteral("文件名：%1\n类型：%2")
+                           .arg(detailName,
+                                mine ? QStringLiteral("本机发送的文件")
+                                     : QStringLiteral("接收到的文件"));
+        if (!detailNote.isEmpty()) {
+            info += QStringLiteral("\n%1").arg(detailNote);
+        }
+        if (!detailPath.isEmpty()) {
+            info += QStringLiteral("\n本地位置：%1\n（点击气泡内的文件名即可打开）")
+                        .arg(detailPath);
+        } else {
+            info += QStringLiteral("\n该文件未保存到本地，无法打开。");
+        }
+        QMessageBox::information(this, QStringLiteral("文件消息详情"), info);
+    };
+
     if (mine) {
-        tsLabel->setAlignment(Qt::AlignRight);
-        vLayout->addWidget(tsLabel);
-        vLayout->addWidget(bubble, 0, Qt::AlignRight);
+        hLayout->addStretch();
+        hLayout->addWidget(tsLabel, 0, Qt::AlignBottom);
+        hLayout->addWidget(bubble);
     } else {
-        tsLabel->setAlignment(Qt::AlignLeft);
-        vLayout->addWidget(tsLabel);
-        vLayout->addWidget(bubble, 0, Qt::AlignLeft);
+        hLayout->addWidget(bubble);
+        hLayout->addWidget(tsLabel, 0, Qt::AlignBottom);
+        hLayout->addStretch();
     }
     return outer;
+}
+
+void RadioPanel::openLocalFile(const QString& path, const QString& displayName)
+{
+    if (path.isEmpty()) return;
+    if (!QFileInfo::exists(path)) {
+        QMessageBox::warning(this, QStringLiteral("无法打开文件"),
+            QStringLiteral("文件不存在或已被移动：\n%1").arg(path));
+        return;
+    }
+    // 用系统默认程序打开；系统没有可用的默认打开程序时明确提示，
+    // 而不是静默失败
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::warning(this, QStringLiteral("无法打开文件"),
+            QStringLiteral("系统没有可用的默认程序来打开“%1”。\n"
+                           "可点击气泡查看文件位置后手动打开。").arg(displayName));
+    }
 }
 
 
@@ -280,26 +396,37 @@ void RadioPanel::setListening(bool on)
 void RadioPanel::setSending(bool on)
 {
     sending_ = on;
-    // 发送中禁止调节：输入框、选文件、调制参数全部变灰；发送键变"停止"
+    // 发送中禁止调节：输入框、选文件、调制参数全部变灰；发送键变"停止发送"
     inputLine_->setEnabled(!on);
     btnFile_->setEnabled(!on);
-    btnSend_->setText(on ? QStringLiteral("停止") : QStringLiteral("发送"));
+    btnSend_->setText(on ? QStringLiteral("停止发送") : QStringLiteral("发送"));
     if (modemSettings_) modemSettings_->setEnabled(!on);
     sendProgress_->setVisible(on);
 
     if (on) {
         sendProgress_->setRange(0, 100);
         sendProgress_->setValue(0);
+        lastSendPercent_ = -1;
         labelStatus_->setText(QStringLiteral("发送中..."));
     } else {
+        lastSendPercent_ = -1;
+        // 注意：不在这里清 sendingIsFile_——它由 onBrowseFile/onSendClicked
+        // 在发起发送时设置；若在此清掉，"发送中被打断后重新发送文件"会被
+        // 误判为文本发送（停止时不再二次确认）
         // 恢复监听状态显示（btnStop_ 可用即表示正在监听）
         labelStatus_->setText(btnStop_->isEnabled() ? QStringLiteral("监听中...")
                                                     : QStringLiteral("未监听"));
     }
 }
 
+void RadioPanel::setSendPhase(const QString& text)
+{
+    labelStatus_->setText(text);
+}
+
 void RadioPanel::setSendProgress(int percent)
 {
+    lastSendPercent_ = percent;
     sendProgress_->setVisible(true);
     if (percent < 0) {
         // 不确定进度（准备音阶段）：忙碌动画
@@ -310,18 +437,47 @@ void RadioPanel::setSendProgress(int percent)
     }
 }
 
+QString RadioPanel::modemSummary() const
+{
+    const PipelineConfig cfg = modemSettings_ ? modemSettings_->getPipelineConfig()
+                                              : PipelineConfig();
+    QString modem;
+    switch (cfg.modemType) {
+        case ModemType::AFSK: modem = QStringLiteral("AFSK"); break;
+        case ModemType::MFSK: modem = QStringLiteral("MFSK (4-FSK)"); break;
+        case ModemType::PSK:  modem = QStringLiteral("PSK (差分)"); break;
+        case ModemType::QAM:  modem = QStringLiteral("16-QAM"); break;
+        default:              modem = QStringLiteral("未知"); break;
+    }
+    QString fec;
+    switch (cfg.fecType) {
+        case FecType::NONE:          fec = QStringLiteral("None"); break;
+        case FecType::HAMMING:       fec = QStringLiteral("Hamming"); break;
+        case FecType::REED_SOLOMON:  fec = QStringLiteral("Reed-Solomon"); break;
+        default:                     fec = QStringLiteral("未知"); break;
+    }
+    return QStringLiteral("%1 / FEC %2").arg(modem, fec);
+}
+
 void RadioPanel::onSendClicked()
 {
     if (sending_) {
-        // 发送中：按钮已变为"停止"；二次确认后中止
-        const QMessageBox::StandardButton ret = QMessageBox::question(
-            this, QStringLiteral("确认停止"),
-            QStringLiteral("当前正在发送，确定要中止吗？\n"
-                           "（对方会收到一条“发送已停止”提示）"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret == QMessageBox::Yes) {
-            emit stopSendRequested();
+        // 停止发送的策略按风险区分：
+        //  - 文本：立即中止，不做无谓确认
+        //  - 文件：弹确认并给出已发送/剩余量（中断损失较大）
+        if (sendingIsFile_) {
+            const int sent = lastSendPercent_ < 0 ? 0 : lastSendPercent_;
+            const QMessageBox::StandardButton ret = QMessageBox::question(
+                this, QStringLiteral("确认停止发送"),
+                QStringLiteral("正在发送文件：已发送约 %1%，剩余约 %2%。\n"
+                               "确定要中止吗？（会尝试向对方发送“发送已停止”通知）")
+                    .arg(sent).arg(100 - sent),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (ret != QMessageBox::Yes) {
+                return;
+            }
         }
+        emit stopSendRequested();
         return;
     }
 
@@ -329,6 +485,7 @@ void RadioPanel::onSendClicked()
     if (text.isEmpty()) {
         return;
     }
+    sendingIsFile_ = false;   // 文本消息：停止时不弹确认
     emit sendRequested(text);
     inputLine_->clear();
 }
@@ -338,9 +495,22 @@ void RadioPanel::onBrowseFile()
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("选择要发送的文件"));
     if (path.isEmpty()) {
+        return;   // 用户取消：不改变输入框与发送状态
+    }
+
+    // 发送文件前先确认：文件名 / 大小 / 当前调制方式与 FEC，
+    // 避免误选文件后立即开始传输
+    const QFileInfo info(path);
+    const QMessageBox::StandardButton ret = QMessageBox::question(
+        this, QStringLiteral("发送文件确认"),
+        QStringLiteral("文件名：%1\n大小：%2\n当前调制：%3\n\n确认通过音频链路发送该文件？")
+            .arg(info.fileName(), formatFileSize(info.size()), modemSummary()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (ret != QMessageBox::Yes) {
         return;
     }
-    // 选中即发送（聊天软件风格）
+
+    sendingIsFile_ = true;   // 文件发送：停止时需确认并显示进度
     emit sendRequested(path);
 }
 

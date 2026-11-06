@@ -56,7 +56,7 @@ void RxPanel::setupUI()
     wavFilePath_ = new QLineEdit(this);
     wavFilePath_->setPlaceholderText(QStringLiteral("选择 WAV 文件..."));
     wavFilePath_->setReadOnly(true);
-    btnBrowse_ = new QPushButton(QStringLiteral("浏览..."), this);
+    btnBrowse_ = new QPushButton(QStringLiteral("选择文件…"), this);
     wavLayout->addWidget(wavFilePath_);
     wavLayout->addWidget(btnBrowse_);
     sourceLayout->addLayout(wavLayout);
@@ -81,9 +81,12 @@ void RxPanel::setupUI()
     QHBoxLayout* saveLayout = new QHBoxLayout();
     savePath_ = new QLineEdit(textPage);
     savePath_->setPlaceholderText(QStringLiteral("保存解码结果到文件..."));
-    QPushButton* btnSave = new QPushButton(QStringLiteral("保存"), textPage);
+    QPushButton* btnSave = new QPushButton(QStringLiteral("保存结果"), textPage);
+    btnClear_ = new QPushButton(QStringLiteral("清空结果"), textPage);
+    btnClear_->setEnabled(false);   // 无内容时禁用；只清显示，不删磁盘文件
     saveLayout->addWidget(savePath_);
     saveLayout->addWidget(btnSave);
+    saveLayout->addWidget(btnClear_);
     textPageLayout->addLayout(saveLayout);
     recvStack_->addWidget(textPage);
 
@@ -97,8 +100,12 @@ void RxPanel::setupUI()
 
     // --- Control ---
     QHBoxLayout* controlLayout = new QHBoxLayout();
-    btnStart_ = new QPushButton(QStringLiteral("开始解析"), this);
-    btnStop_ = new QPushButton(QStringLiteral("停止"), this);
+    // 默认是 WAV 文件模式：按钮文案必须说明操作对象（解析 WAV / 停止解析），
+    // 避免只写"停止"让人不知道停的是什么。
+    btnStart_ = new QPushButton(QStringLiteral("解析 WAV"), this);
+    btnStart_->setProperty("primary", true);   // 主色按钮（主题 QSS 识别）
+    btnStop_ = new QPushButton(QStringLiteral("停止解析"), this);
+    btnStop_->setProperty("danger", true);     // 停止类按钮用危险色文字
     btnStop_->setEnabled(false);
     controlLayout->addWidget(btnStart_);
     controlLayout->addWidget(btnStop_);
@@ -139,6 +146,12 @@ void RxPanel::setupUI()
         file.close();
         labelStatus_->setText(QStringLiteral("已保存到: %1").arg(path));
     });
+    // 清空结果：只清除面板显示内容，已保存到磁盘的文件不受影响
+    connect(btnClear_, &QPushButton::clicked, this, [this]() {
+        receivedText_->clear();
+        btnClear_->setEnabled(false);
+        labelStatus_->setText(QStringLiteral("已清空显示结果（磁盘文件不受影响）"));
+    });
 }
 
 void RxPanel::onBrowseWav()
@@ -154,6 +167,7 @@ void RxPanel::onBrowseWav()
 void RxPanel::clearReceived()
 {
     receivedText_->clear();
+    if (btnClear_) btnClear_->setEnabled(false);
 }
 
 void RxPanel::onModeChanged()
@@ -161,8 +175,10 @@ void RxPanel::onModeChanged()
     const bool wavMode = radioWav_->isChecked();
     wavFilePath_->setVisible(wavMode);
     btnBrowse_->setVisible(wavMode);
-    btnStart_->setText(wavMode ? QStringLiteral("开始解析")
+    btnStart_->setText(wavMode ? QStringLiteral("解析 WAV")
                                : QStringLiteral("开始监听"));
+    btnStop_->setText(wavMode ? QStringLiteral("停止解析")
+                              : QStringLiteral("停止监听"));
     labelStatus_->setText(QStringLiteral("就绪"));
     progress_->setRange(0, 100);
     progress_->setValue(0);
@@ -206,12 +222,14 @@ void RxPanel::onStopClicked()
     btnStop_->setEnabled(false);
     radioWav_->setEnabled(true);
     radioMic_->setEnabled(true);
-    labelStatus_->setText(QStringLiteral("已停止"));
+    labelStatus_->setText(radioWav_->isChecked() ? QStringLiteral("已停止解析")
+                                                  : QStringLiteral("已停止监听"));
 }
 
 void RxPanel::onDataReceived(const QString& text)
 {
     receivedText_->append(text);
+    if (btnClear_) btnClear_->setEnabled(!receivedText_->toPlainText().isEmpty());
 }
 
 void RxPanel::onFileReceived(const QString& filename)

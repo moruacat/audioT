@@ -67,7 +67,7 @@ void TxPanel::setupUI()
     filePathEdit_ = new QLineEdit(this);
     filePathEdit_->setPlaceholderText(QStringLiteral("选择输入文件..."));
     filePathEdit_->setReadOnly(true);
-    btnBrowse_ = new QPushButton(QStringLiteral("浏览..."), this);
+    btnBrowse_ = new QPushButton(QStringLiteral("选择文件…"), this);
     fileLayout->addWidget(filePathEdit_);
     fileLayout->addWidget(btnBrowse_);
     inputLayout->addLayout(fileLayout);
@@ -89,8 +89,8 @@ void TxPanel::setupUI()
     QHBoxLayout* outputLayout = new QHBoxLayout(outputGroup);
     outputWavPath_ = new QLineEdit(this);
     outputWavPath_->setPlaceholderText(QStringLiteral("输出 WAV 文件路径..."));
-    btnBrowseOut_ = new QPushButton(QStringLiteral("浏览..."), this);
-    btnExportWav_ = new QPushButton(QStringLiteral("导出WAV"), this);
+    btnBrowseOut_ = new QPushButton(QStringLiteral("选择保存位置…"), this);
+    btnExportWav_ = new QPushButton(QStringLiteral("导出 WAV"), this);
     outputLayout->addWidget(outputWavPath_);
     outputLayout->addWidget(btnBrowseOut_);
     outputLayout->addWidget(btnExportWav_);
@@ -99,13 +99,15 @@ void TxPanel::setupUI()
     // --- Control ---
     QHBoxLayout* controlLayout = new QHBoxLayout();
     btnStart_ = new QPushButton(QStringLiteral("开始发射"), this);
-    btnStop_ = new QPushButton(QStringLiteral("停止"), this);
+    btnStart_->setProperty("primary", true);   // 主色按钮（主题 QSS 识别）
+    btnStop_ = new QPushButton(QStringLiteral("停止发射"), this);
+    btnStop_->setProperty("danger", true);     // 停止类按钮用危险色文字
     btnStop_->setEnabled(false);
-    labelWarning_ = new QLabel(QStringLiteral("警告！巨大噪音！"), this);
-    labelWarning_->setStyleSheet(QStringLiteral("color: #ff0000; font-weight: bold;"));
+    labelHint_ = new QLabel(this);
+    setHint(QStringLiteral("发射时输出设备将播放调制音频，请先确认输出设备与音量"), false);
     controlLayout->addWidget(btnStart_);
     controlLayout->addWidget(btnStop_);
-    controlLayout->addWidget(labelWarning_);
+    controlLayout->addWidget(labelHint_);
     controlLayout->addStretch();
     mainLayout->addLayout(controlLayout);
 
@@ -129,9 +131,21 @@ void TxPanel::setupUI()
     connect(btnStop_, &QPushButton::clicked, this, &TxPanel::onStopClicked);
 }
 
+void TxPanel::setHint(const QString& text, bool error)
+{
+    // 提示文字随发射阶段变化；只有真正出错时才用红色，
+    // 避免常驻红字被用户忽略。
+    labelHint_->setText(text);
+    labelHint_->setStyleSheet(error
+        ? QStringLiteral("color:#ff7b72; font-weight:bold;")
+        : QStringLiteral("color:#9a9a9a;"));
+}
+
 void TxPanel::onModeChanged()
 {
     const bool textMode = radioText_->isChecked();
+    // 切换输入源只切换显示哪一块输入区，已输入文本/已选文件都原样保留，
+    // 不会静默清空用户内容。
     textInput_->setVisible(textMode);
     filePathEdit_->setVisible(!textMode);
     btnBrowse_->setVisible(!textMode);
@@ -192,22 +206,23 @@ void TxPanel::onExportClicked()
 
 void TxPanel::onStartClicked()
 {
+    QString payload;
     if (radioText_->isChecked()) {
-        QString text = textInput_->toPlainText().trimmed();
-        if (text.isEmpty()) {
+        payload = textInput_->toPlainText().trimmed();
+        if (payload.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请输入文本内容"));
             return;
         }
-        emit startTransmission(text);
     } else {
-        QString path = filePathEdit_->text().trimmed();
-        if (path.isEmpty()) {
+        payload = filePathEdit_->text().trimmed();
+        if (payload.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请选择输入文件"));
             return;
         }
-        emit startTransmission(path);
     }
 
+    // 先进入"发射中"状态再通知主窗口：编码现在在后台线程进行，
+    // 主窗口随后会把状态改写为"编码中..."（若先 emit 会被这里覆盖）
     btnStart_->setEnabled(false);
     btnStop_->setEnabled(true);
     radioText_->setEnabled(false);
@@ -215,6 +230,8 @@ void TxPanel::onStartClicked()
     radioImage_->setEnabled(false);
     progress_->setValue(0);
     labelStatus_->setText(QStringLiteral("发射中..."));
+
+    emit startTransmission(payload);
 }
 
 void TxPanel::onStopClicked()
@@ -222,7 +239,8 @@ void TxPanel::onStopClicked()
     emit stopTransmission();
     btnStart_->setEnabled(true);
     btnStop_->setEnabled(false);
-    labelStatus_->setText(QStringLiteral("已停止"));
+    labelStatus_->setText(QStringLiteral("已停止发射"));
+    setHint(QStringLiteral("发射时输出设备将播放调制音频，请先确认输出设备与音量"), false);
 }
 
 void TxPanel::onTransmissionProgress(int percent)
@@ -233,6 +251,19 @@ void TxPanel::onTransmissionProgress(int percent)
 void TxPanel::onTransmissionStatus(const QString& status)
 {
     labelStatus_->setText(status);
+    // 提示文字随阶段切换：准备音 / 发射中 / 出错（红色）/ 结束复位
+    if (status.contains(QStringLiteral("失败")) || status.contains(QStringLiteral("错误"))
+        || status.contains(QStringLiteral("无法"))) {
+        setHint(status, true);
+    } else if (status.contains(QStringLiteral("准备音"))) {
+        setHint(QStringLiteral("正在播放准备音，请确认输出设备与音量"), false);
+    } else if (status.contains(QStringLiteral("发射中"))) {
+        setHint(QStringLiteral("正在播放编码音频，请勿将音量调至过高"), false);
+    } else if (status.contains(QStringLiteral("完成")) ||
+               status.contains(QStringLiteral("停止"))) {
+        setHint(QStringLiteral("发射时输出设备将播放调制音频，请先确认输出设备与音量"), false);
+    }
+
     if (status.contains(QStringLiteral("完成")) || status.contains(QStringLiteral("失败"))) {
         btnStart_->setEnabled(true);
         btnStop_->setEnabled(false);

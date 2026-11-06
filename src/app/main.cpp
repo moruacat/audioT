@@ -1,4 +1,4 @@
-﻿// main.cpp - AudioT entry point (CLI or Qt GUI)
+// main.cpp - AudioT entry point (CLI or Qt GUI)
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -23,6 +23,7 @@
 #include <QFont>
 #include <QAudioDeviceInfo>
 #include "ui/main_window.h"
+#include "ui/theme.h"
 #endif
 
 #ifndef AUDIOT_VERSION
@@ -190,6 +191,10 @@ int main(int argc, char* argv[]) {
         QFont uiFont = app.font();
         uiFont.setFamily(QStringLiteral("Microsoft YaHei"));
         app.setFont(uiFont);
+
+        // 深色主题为正式主题（主色 #1585C0）：调色板 + 全局 QSS。
+        // 必须在创建窗口之前应用，避免首帧以浅色绘制后整窗重绘闪烁。
+        audiot::applyDarkTheme(app);
 
         audiot::MainWindow window;
         window.show();

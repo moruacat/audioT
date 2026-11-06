@@ -9,6 +9,8 @@
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QPushButton>
+#include <QLabel>
+#include <QFormLayout>
 #include <QAudioDeviceInfo>
 
 #include "audio/audio_device.h"
@@ -36,7 +38,13 @@ public:
     // 高级设置面板跟随当前收发选项卡：显示并编辑该选项卡的调制高级参数
     // （Mark/Space/波特率、MFSK 档位、PSK 阶数、PSK/QAM 档位），并按该
     // 选项卡当前的调制方式决定显示哪些项。传 nullptr 表示无活动选项卡。
-    void setActiveModem(ModemSettingsWidget* modem);
+    // taskName 为当前任务名（"发射" / "接收" / "电台"），用于在"当前任务
+    // 参数"区标题上标明这些参数属于谁。
+    void setActiveModem(ModemSettingsWidget* modem, const QString& taskName = QString());
+
+    // 输入设备被哪个任务占用（空表示空闲）：共享输入设备时明确提示，
+    // 避免用户以为设备"选了没用"。
+    void setInputDeviceBusy(const QString& byTask);
 
 public slots:
     void saveSettings();
@@ -66,12 +74,14 @@ private:
     QComboBox* comboInputDevice_;
     QComboBox* comboOutputDevice_;
     QPushButton* btnRefreshDevices_;
+    QLabel* noteDevice_;          // 输入设备占用状态提示
 
-    // 全局参数
+    // 全局音频参数：对发射 / 接收 / 电台都生效，常驻可见（不再折叠隐藏）
     QComboBox* comboSampleRate_;
     QComboBox* comboBufferSize_;
+    QLabel* noteGlobal_;          // 全局参数生效范围说明
 
-    // 调制高级参数（跟随活动选项卡，按调制方式显隐）
+    // 当前任务参数（跟随活动选项卡，按调制方式显隐）
     QSpinBox* spinMarkFreq_;      // AFSK：Mark 频率
     QSpinBox* spinSpaceFreq_;     // AFSK：Space 频率
     QSpinBox* spinBaudRate_;      // AFSK：波特率
@@ -79,7 +89,9 @@ private:
     QComboBox* comboPskOrder_;    // PSK：阶数
     QComboBox* comboPskQamRate_;  // PSK / QAM：档位
 
-    QGroupBox* advancedGroup_;
+    QGroupBox* taskGroup_;        // "当前任务参数"分组（标题含任务名）
+    QLabel* noteTask_;            // 任务参数归属说明
+    QFormLayout* taskLayout_;     // 任务参数表单布局（用于整行显隐）
 };
 
 } // namespace audiot

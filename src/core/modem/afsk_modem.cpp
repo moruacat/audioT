@@ -54,7 +54,12 @@ void AFSKModem::generateTone(std::vector<float>& output, uint8_t bit) {
     int n = samplesPerBit();
     float phaseInc = TWO_PI * freq / static_cast<float>(config_.sampleRate);
 
-    output.reserve(output.size() + n);
+    // 注意：这里**不能**按"当前长度 + n"调用 reserve。reserve 请求量
+    // 每次都大于当前容量时，vector 会在每个比特上重新分配并把已累积的
+    // 样本整体拷贝一遍，总代价 O(比特数²)。32 KB 文件经 Hamming FEC 后
+    // 约 46 万比特，会产生 TB 级的内存拷贝，界面直接"未响应"。
+    // 容量由 modulate() 一次性预留（见下），这里只做 push_back 的
+    // 摊还增长即可。
     for (int i = 0; i < n; ++i) {
         output.push_back(std::sin(phase_));
         phase_ += phaseInc;
@@ -69,10 +74,16 @@ std::vector<float> AFSKModem::modulate(const std::vector<uint8_t>& bits) {
     // Reset phase for clean start
     phase_ = 0.0f;
 
+    std::vector<uint8_t> preamble = generatePreamble();
+    std::vector<uint8_t> postamble = generatePostamble();
+
     std::vector<float> output;
+    // 一次性预留全部样本容量（前导 + 数据 + 尾比特），使 generateTone
+    // 里的 push_back 完全不再触发重新分配。
+    const size_t totalBits = preamble.size() + bits.size() + postamble.size();
+    output.reserve(totalBits * static_cast<size_t>(samplesPerBit()));
 
     // Preamble
-    std::vector<uint8_t> preamble = generatePreamble();
     for (size_t i = 0; i < preamble.size(); ++i) {
         generateTone(output, preamble[i]);
     }
@@ -83,7 +94,6 @@ std::vector<float> AFSKModem::modulate(const std::vector<uint8_t>& bits) {
     }
 
     // Postamble
-    std::vector<uint8_t> postamble = generatePostamble();
     for (size_t i = 0; i < postamble.size(); ++i) {
         generateTone(output, postamble[i]);
     }
