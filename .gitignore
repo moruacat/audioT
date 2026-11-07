@@ -25,6 +25,7 @@ tool/
 
 # 工具 / 工作区元数据
 .codewhale/
+.trae/
 
 # IDE / 编辑器
 .vscode/

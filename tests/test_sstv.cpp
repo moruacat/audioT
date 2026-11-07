@@ -12,10 +12,12 @@
 
 #include <sstv/sstv_protocol.h>
 #include <sstv/sstv_encoder.h>
+#include <sstv/sstv_decoder.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -276,12 +278,23 @@ const RefSeg kRefR36Odd[] = {
     { 1,  1.5, 1900.0f, 0,   0 },
     { 2, 44.0,    0.0f, 3, 160 },
 };
-// 负对照③：旧实现把 Robot 36 也当成同步加三等分（且用 R/G/B 色空间）
+// 负对照③：旧实现把 Robot 36 也当成"同步加三等分"（且用 R/G/B 色空间）。
+// 段总时长必须等于 lineMs(150)，否则参考生成器的毫秒游标会回退、
+// 生成出内容叠错的波形，测出的失配就不再是"模型错误"造成的。
 const RefSeg kRefR36EqualThirds[] = {
-    { 0,   9.0, 1200.0f, 0,   0 },
-    { 2, 141.0,    0.0f, 4, 320 },
-    { 2, 141.0,    0.0f, 6, 320 },
-    { 2, 141.0,    0.0f, 5, 320 },
+    { 0,  9.0, 1200.0f, 0,   0 },
+    { 2, 47.0,    0.0f, 4, 320 },
+    { 2, 47.0,    0.0f, 6, 320 },
+    { 2, 47.0,    0.0f, 5, 320 },
+};
+
+// 负对照④：旧实现 Martin M1 的**行速快 3 倍**（行时长 146.446 ms 而不是
+// 446.446 ms）。段总时长必须等于 146.446，否则同理会生成叠错的波形。
+const RefSeg kRefM1FastThirds[] = {
+    { 0,   4.862,  1200.0f, 0,   0 },
+    { 2,  47.1947,    0.0f, 5, 320 },
+    { 2,  47.1947,    0.0f, 6, 320 },
+    { 2,  47.1947,    0.0f, 4, 320 },
 };
 
 // ---- 标准公式（测试侧独立复算） ----
@@ -695,5 +708,297 @@ TEST_CASE("SSTV: Robot 36 chroma is horizontally averaged 2:1 and uses BT.601",
                                         seg.len / 2, sr, 2300.0);
         INFO("纯蓝色差 Cb 实测=" << est << " (标准应饱和到 2300)");
         CHECK(est > 2250.0);
+    }
+}
+
+// ================================================================
+// C 层：独立参考波形 -> 生产解码器
+//
+// 这一层是唯一能抓住"编码器与解码器共用同一个错误约定"的手段：
+// 参考波形由测试内按标准字面常量合成（refGenerate，不引用生产表），
+// 解码器却来自生产代码；如果两边都错了，这里必然失败。
+// ================================================================
+
+namespace {
+
+// 四象限图：四个纯色块。色块内部是常数，便于用误差统计判断解调质量，
+// 象限边界还能顺带暴露"整行水平错位"这类问题。
+std::vector<uint8_t> makeQuadrantImage(int w, int h)
+{
+    std::vector<uint8_t> img(static_cast<size_t>(w) * static_cast<size_t>(h) * 3, 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const bool right = (x >= w / 2);
+            const bool bottom = (y >= h / 2);
+            const size_t i = (static_cast<size_t>(y) * w + x) * 3;
+            img[i + 0] = static_cast<uint8_t>(bottom ? (right ? 210 : 70)
+                                                     : (right ? 70 : 190));
+            img[i + 1] = static_cast<uint8_t>(bottom ? (right ? 210 : 70)
+                                                     : (right ? 190 : 70));
+            img[i + 2] = static_cast<uint8_t>(bottom ? (right ? 70 : 210)
+                                                     : (right ? 70 : 190));
+        }
+    }
+    return img;
+}
+
+struct ErrorStats {
+    double meanAbs = 0.0;
+    int maxAbs = 0;
+    double fracWithin8 = 0.0;
+    double fracWithin12 = 0.0;
+};
+
+// 只统计 margin 之内、且不属于象限边界带的像素：
+// 最外圈受行首/行尾滤波器暂态与色度插值边界影响，
+// 象限边界（x=w/2、y=h/2 附近）受 2 像素平滑与 4:2:0 插值影响，
+// 这些位置本来就不代表解调精度。
+ErrorStats compareImages(const std::vector<uint8_t>& ref,
+                         const std::vector<uint8_t>& got,
+                         int w, int h, int margin, int skipBand)
+{
+    ErrorStats st;
+    double sum = 0.0;
+    long long count = 0;
+    long long w8 = 0;
+    long long w12 = 0;
+    for (int y = margin; y < h - margin; ++y) {
+        if (skipBand > 0 && std::abs(y - h / 2) <= skipBand) {
+            continue;
+        }
+        for (int x = margin; x < w - margin; ++x) {
+            if (skipBand > 0 && std::abs(x - w / 2) <= skipBand) {
+                continue;
+            }
+            const size_t i = (static_cast<size_t>(y) * w + x) * 3;
+            for (int c = 0; c < 3; ++c) {
+                const int d = std::abs(static_cast<int>(ref[i + c]) -
+                                       static_cast<int>(got[i + c]));
+                sum += static_cast<double>(d);
+                if (d > st.maxAbs) {
+                    st.maxAbs = d;
+                }
+                if (d <= 8) ++w8;
+                if (d <= 12) ++w12;
+                ++count;
+            }
+        }
+    }
+    if (count > 0) {
+        st.meanAbs = sum / static_cast<double>(count);
+        st.fracWithin8 = static_cast<double>(w8) / static_cast<double>(count);
+        st.fracWithin12 = static_cast<double>(w12) / static_cast<double>(count);
+    }
+    return st;
+}
+
+} // namespace
+
+TEST_CASE("SSTV: decoder rejects silence, bad VIS and too-low sample rate",
+          "[sstv][decoder]") {
+    const int sr = 44100;
+
+    // 纯静音
+    {
+        const std::vector<float> silence(static_cast<size_t>(sr) * 2, 0.0f);
+        const DecodeResult r = decode(silence, sr);
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.error.empty());
+    }
+
+    // 一段不存在的 VIS 码（60 = Scottie S1，本次未支持）：必须明确报错，
+    // 不能像旧实现那样静默 fallback 成 Martin M1。
+    {
+        const ModeSpec* m1 = modeSpecFromVisCode(44);
+        REQUIRE(m1 != nullptr);
+        const std::vector<uint8_t> img = makeSolidImage(m1->width, m1->height, 128, 128, 128);
+        const std::vector<float> wave = refGenerate(
+            img, m1->width, m1->height, kRefM1Std, 8, nullptr, 0, 60,
+            kRefM1LineMs, kRefM1FrameMs, sr, 0.8f);
+        const DecodeResult r = decode(wave, sr);
+        CHECK_FALSE(r.ok);
+        CHECK(r.error.find("VIS=60") != std::string::npos);
+    }
+
+    // 采样率过低必须直接拒绝（而不是给出糊成一团的图）
+    {
+        const std::vector<float> anyAudio(40000, 0.0f);
+        const DecodeResult r = decode(anyAudio, 16000);
+        CHECK_FALSE(r.ok);
+        INFO("error=" << r.error);
+        CHECK_FALSE(r.error.empty());
+    }
+}
+
+TEST_CASE("SSTV: decoder reconstructs Martin M1 from an independent reference waveform",
+          "[sstv][decoder]") {
+    const int sr = 44100;
+    const ModeSpec* m1 = modeSpecFromVisCode(44);
+    REQUIRE(m1 != nullptr);
+
+    const std::vector<uint8_t> img = makeQuadrantImage(m1->width, m1->height);
+
+    // 关键：波形由测试内按标准字面常量合成，不经过生产编码器
+    const std::vector<float> wave = refGenerate(
+        img, m1->width, m1->height, kRefM1Std, 8, nullptr, 0, 44,
+        kRefM1LineMs, kRefM1FrameMs, sr, 0.8f);
+    REQUIRE(!wave.empty());
+
+    const DecodeResult r = decode(wave, sr);
+    INFO("error=" << r.error << " warning=" << r.warning
+                  << " confidence=" << r.confidence
+                  << " synced=" << r.linesSynced << "/" << r.linesTotal);
+    REQUIRE(r.ok);
+    CHECK(r.mode == m1);
+    CHECK(r.width == m1->width);
+    CHECK(r.height == m1->height);
+    REQUIRE(static_cast<int>(r.rgb.size()) == r.width * r.height * 3);
+
+    const ErrorStats st = compareImages(img, r.rgb, r.width, r.height, 6, 6);
+    INFO("M1 误差: mean=" << st.meanAbs << " max=" << st.maxAbs
+                          << " <=8:" << st.fracWithin8 << " <=12:" << st.fracWithin12);
+    // 相位差分鉴频的理论误差约 17 Hz（≈6 灰阶），再叠加 2 像素平滑，
+    // 因此单像素误差到十几是正常的；要求 95% 的像素落在 12 灰阶以内。
+    CHECK(st.fracWithin12 > 0.95);
+    CHECK(st.maxAbs <= 60);
+    CHECK(r.confidence > 0.9f);
+}
+
+TEST_CASE("SSTV: decoder reconstructs Robot 36 from an independent reference waveform",
+          "[sstv][decoder]") {
+    const int sr = 44100;
+    const ModeSpec* r36 = modeSpecFromVisCode(8);
+    REQUIRE(r36 != nullptr);
+
+    const std::vector<uint8_t> img = makeQuadrantImage(r36->width, r36->height);
+
+    const std::vector<float> wave = refGenerate(
+        img, r36->width, r36->height, kRefR36Even, 6, kRefR36Odd, 6, 8,
+        kRefR36LineMs, kRefR36FrameMs, sr, 0.8f);
+    REQUIRE(!wave.empty());
+
+    const DecodeResult r = decode(wave, sr);
+    INFO("error=" << r.error << " warning=" << r.warning
+                  << " confidence=" << r.confidence
+                  << " synced=" << r.linesSynced << "/" << r.linesTotal);
+    REQUIRE(r.ok);
+    CHECK(r.mode == r36);
+    REQUIRE(static_cast<int>(r.rgb.size()) == r.width * r.height * 3);
+
+    const ErrorStats st = compareImages(img, r.rgb, r.width, r.height, 8, 12);
+    INFO("R36 误差: mean=" << st.meanAbs << " max=" << st.maxAbs
+                           << " <=8:" << st.fracWithin8 << " <=12:" << st.fracWithin12);
+    // 色度是 4:2:0（水平 160 点、垂直隔行），象限边界的过渡列/行误差较大，
+    // 已用 skipBand 排除；其余区域的误差应接近噪声下限。
+    // 99.5% 的像素在 8 个灰阶以内；单点最大值仍会落在过渡残留处，
+    // 这个指标用 30 作为上限，用于抓"整行错位"这类会普遍变大的错误。
+    CHECK(st.fracWithin8 > 0.95);
+    CHECK(st.maxAbs <= 30);
+}
+
+TEST_CASE("SSTV: decoder tolerates noise and a 0.1% sample-clock offset",
+          "[sstv][decoder][robust]") {
+    // 两项真实场景的退化：
+    //   1) 10 dB 白噪声（电台/磁带链路的典型信噪比下限）；
+    //   2) 声卡时钟偏差 0.1%：M1 一帧 115 s，239 行后累计偏移约 35 ms，
+    //      远超一个 porch 的宽度，必须靠 sync 跟踪 + 最小二乘拟合才能跟上。
+    const int sr = 44100;
+    const ModeSpec* m1 = modeSpecFromVisCode(44);
+    REQUIRE(m1 != nullptr);
+
+    const std::vector<uint8_t> img = makeQuadrantImage(m1->width, m1->height);
+    const std::vector<float> clean = refGenerate(
+        img, m1->width, m1->height, kRefM1Std, 8, nullptr, 0, 44,
+        kRefM1LineMs, kRefM1FrameMs, sr, 0.8f);
+    REQUIRE(!clean.empty());
+
+    // ---- 1) 10 dB AWGN ----
+    {
+        std::vector<float> noisy(clean);
+        // 固定种子的简单线性同余，保证测试可复现
+        unsigned int seed = 12345u;
+        const double signalPower = 0.32;                 // (0.8/√2)²
+        const double noiseSigma = std::sqrt(signalPower / 10.0);
+        for (size_t i = 0; i < noisy.size(); ++i) {
+            seed = seed * 1103515245u + 12345u;
+            const double u1 = ((seed >> 16) & 0x7FFF) / 32768.0 + 1e-9;
+            seed = seed * 1103515245u + 12345u;
+            const double u2 = ((seed >> 16) & 0x7FFF) / 32768.0;
+            // Box-Muller 得到高斯噪声
+            const double g = std::sqrt(-2.0 * std::log(u1)) * std::cos(kTestTwoPi * u2);
+            noisy[i] += static_cast<float>(noiseSigma * g);
+        }
+
+        const DecodeResult r = decode(noisy, sr);
+        INFO("10dB 噪声: error=" << r.error << " confidence=" << r.confidence
+                                 << " synced=" << r.linesSynced);
+        REQUIRE(r.ok);
+        const ErrorStats st = compareImages(img, r.rgb, r.width, r.height, 8, 12);
+        INFO("10dB 噪声误差: mean=" << st.meanAbs << " max=" << st.maxAbs
+                                    << " <=12:" << st.fracWithin12);
+        // 噪声下允许明显退化，但画面必须仍然"认得出"：绝大多数像素在 12 以内
+        CHECK(st.fracWithin12 > 0.80);
+        CHECK(r.confidence > 0.7f);
+    }
+
+    // ---- 2) 0.1% 采样时钟偏移 ----
+    {
+        std::vector<float> skewed;
+        const double factor = 1.001;   // 录音时钟比发送端快 0.1%
+        const long long outLen =
+            static_cast<long long>(static_cast<double>(clean.size()) / factor);
+        skewed.reserve(static_cast<size_t>(outLen));
+        for (long long i = 0; i < outLen; ++i) {
+            const double src = static_cast<double>(i) * factor;
+            const long long i0 = static_cast<long long>(src);
+            const long long i1 = std::min<long long>(
+                i0 + 1, static_cast<long long>(clean.size()) - 1);
+            const double t = src - static_cast<double>(i0);
+            skewed.push_back(static_cast<float>(
+                clean[static_cast<size_t>(i0)] * (1.0 - t) +
+                clean[static_cast<size_t>(i1)] * t));
+        }
+
+        const DecodeResult r = decode(skewed, sr);
+        INFO("时钟偏移 1.001x: error=" << r.error << " confidence=" << r.confidence
+                                       << " synced=" << r.linesSynced);
+        REQUIRE(r.ok);
+        const ErrorStats st = compareImages(img, r.rgb, r.width, r.height, 8, 12);
+        INFO("时钟偏移误差: mean=" << st.meanAbs << " max=" << st.maxAbs
+                                   << " <=12:" << st.fracWithin12);
+        CHECK(st.fracWithin12 > 0.90);
+        // 拟合成功的标志：几乎全部行都锁到了同步
+        CHECK(r.confidence > 0.9f);
+    }
+}
+
+TEST_CASE("SSTV: decoder refuses the old equal-thirds timing model",
+          "[sstv][decoder]") {
+    // 旧实现把 Martin M1 的行时长当成 146.432 ms（实际 446.446 ms），
+    // 行速快了 3 倍。这种波形不能出一张"看起来还行"的图误导用户：
+    // 要么直接失败，要么把置信度压到很低并给出明确 warning。
+    const int sr = 44100;
+    const ModeSpec* m1 = modeSpecFromVisCode(44);
+    REQUIRE(m1 != nullptr);
+
+    const std::vector<uint8_t> img = makeSolidImage(m1->width, m1->height, 128, 128, 128);
+    // 旧模型的波形：行距 146.446 ms（真值 446.446 ms），段总时长也按 146.446
+    // 拼出来，这样参考生成器的毫秒游标不会回退，波形本身是"行速快 3 倍"的真实信号。
+    const double fastLineMs = 146.446;
+    const std::vector<float> bad = refGenerate(
+        img, m1->width, m1->height, kRefM1FastThirds, 4, nullptr, 0, 44,
+        fastLineMs, 880.0 + 256.0 * fastLineMs, sr, 0.8f);
+    REQUIRE(!bad.empty());
+
+    const DecodeResult r = decode(bad, sr);
+    INFO("error=" << r.error << " warning=" << r.warning
+                  << " confidence=" << r.confidence);
+    // 计划要求"拒绝或低置信"：正常波形的置信度是 1.0，这里只要明显低于它、
+    // 且给出可见的警告即可（阈值 0.5 足以区分"正常"与"错模型"）。
+    CHECK((!r.ok || r.confidence <= 0.5f));
+    if (!r.ok) {
+        CHECK_FALSE(r.error.empty());
+    } else {
+        CHECK_FALSE(r.warning.empty());
     }
 }

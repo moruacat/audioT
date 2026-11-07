@@ -27,6 +27,7 @@ AudioT 是一个基于音频信号的数据收发软件：它将**文本 / 文�
   - 文本编码（TextCodec）
   - 文件编码（FileCodec）
   - **图片 / 视频数字传输**：按类型标记（`'I'` 图片 / `'V'` 视频）打包，与文件走同一条 FEC + 调制链路，接收端按类别无损还原
+  - **SSTV 模拟图像传输**（独立「SSTV」选项卡）：Martin M1 与 Robot 36，图片→音频（发射 / 导出 WAV）与音频→图片（解析 WAV / 麦克风整段录制）双向；按 VIS 自动识别或手动指定模式。**仅限个人学习与实验，未取得业余无线电执照不得用于空口发射**（见 [docs/SSTV_免责声明.md](docs/SSTV_免责声明.md)）
 
 > 说明：LDPC 纠错实现未接入流水线，故不列为已支持功能。旧的 PSK/QAM 相干
 > 实现（自环即失败）已由 `src/core/modem/dpsk_modem`、`src/core/modem/qam16_modem`

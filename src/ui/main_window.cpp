@@ -30,8 +30,15 @@
 #include "core/pipeline/rx_pipeline.h"
 #include "audio/wav_reader.h"
 #include "audio/wav_writer.h"
+#include "sstv_panel.h"
+#include "core/sstv/sstv_encoder.h"
+#include "core/sstv/sstv_decoder.h"
 
 #include <QDateTime>
+#include <QScrollArea>
+#include <QFrame>
+#include <QFileDialog>
+#include <QMessageBox>
 
 namespace audiot {
 
@@ -65,6 +72,7 @@ MainWindow::MainWindow(QWidget* parent)
     , txDrainTicks_(0)
     , txDataPhaseAnnounced_(false)
     , txFromRadio_(false)
+    , txFromSstv_(false)
     , txStopNotice_(false)
     , txOnAir_(false)
     , radioListening_(false)
@@ -83,6 +91,15 @@ MainWindow::MainWindow(QWidget* parent)
     , txExportThread_(nullptr)
     , txExportGen_(0)
     , txEncodeGen_(0)
+    , sstvMicListening_(false)
+    , sstvMicQuiet_(0)
+    , sstvMicSignalSeen_(false)
+    , sstvMicSampleRate_(0)
+    , sstvMicTimer_(nullptr)
+    , sstvDecodeThread_(nullptr)
+    , sstvDecodeAborted_(false)
+    , sstvDecodeGen_(0)
+    , sstvDecodeRunning_(false)
 {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app-logo.svg")));
     setWindowTitle(QStringLiteral("AudioT - 音频数据通信"));
@@ -96,6 +113,11 @@ MainWindow::MainWindow(QWidget* parent)
     // Pacing timer for real-time TX playback (push writes to QAudioOutput)
     txPlaybackTimer_ = new QTimer(this);
     connect(txPlaybackTimer_, &QTimer::timeout, this, &MainWindow::onTxPlaybackTick);
+
+    // SSTV 整段录制的收尾检查（500ms 一次，只判断"尾部静音够长/超过上限"）
+    sstvMicTimer_ = new QTimer(this);
+    sstvMicTimer_->setInterval(500);
+    connect(sstvMicTimer_, &QTimer::timeout, this, &MainWindow::onSstvMicTick);
 
     setupUI();
     setupMenuBar();
@@ -161,6 +183,22 @@ MainWindow::~MainWindow()
         }
     }
     txEncodeJobs_.clear();
+
+    // SSTV：停止整段录制，回收后台解码线程（否则 std::thread 析构会 terminate）
+    if (sstvMicTimer_) {
+        sstvMicTimer_->stop();
+    }
+    sstvMicListening_ = false;
+    sstvMicBuf_.clear();
+    sstvDecodeAborted_ = true;
+    if (sstvDecodeThread_) {
+        if (sstvDecodeThread_->joinable()) {
+            sstvDecodeThread_->join();
+        }
+        delete sstvDecodeThread_;
+        sstvDecodeThread_ = nullptr;
+    }
+
     if (audioInput_->isRunning()) {
         audioInput_->stop();
     }
@@ -193,10 +231,17 @@ void MainWindow::setupUI()
     txPanel_ = new TxPanel(left);
     rxPanel_ = new RxPanel(left);
     radioPanel_ = new RadioPanel(left);
+    sstvPanel_ = new SstvPanel(nullptr);
 
     tabWidget_->addTab(txPanel_, QStringLiteral("发射"));
     tabWidget_->addTab(rxPanel_, QStringLiteral("接收"));
     tabWidget_->addTab(radioPanel_, QStringLiteral("电台"));
+    // SSTV 内容比另外三页多，放进滚动区，避免在 700x500 的最小窗口下被压扁
+    QScrollArea* sstvScroll = new QScrollArea(tabWidget_);
+    sstvScroll->setWidgetResizable(true);
+    sstvScroll->setFrameShape(QFrame::NoFrame);
+    sstvScroll->setWidget(sstvPanel_);
+    tabWidget_->addTab(sstvScroll, QStringLiteral("SSTV"));
 
     mainLayout->addWidget(tabWidget_);
 
@@ -269,9 +314,25 @@ void MainWindow::connectSignals()
         if (idx == 0) m = txPanel_->modemSettings();
         else if (idx == 1) m = rxPanel_->modemSettings();
         else if (idx == 2) m = radioPanel_->modemSettings();
+        // idx == 3 是 SSTV：模拟制式没有调制方式/FEC，传 nullptr 让右侧
+        // "当前任务参数"区隐藏，而不是继续显示上一页的参数
         settingsDialog_->setActiveModem(m, tabWidget_->tabText(idx));
     });
     settingsDialog_->setActiveModem(txPanel_->modemSettings(), tabWidget_->tabText(0));
+
+    // SSTV 面板信号
+    connect(sstvPanel_, &SstvPanel::transmitRequested,
+            this, &MainWindow::onSstvTransmit);
+    connect(sstvPanel_, &SstvPanel::stopTransmitRequested,
+            this, &MainWindow::onSstvStopTransmit);
+    connect(sstvPanel_, &SstvPanel::exportWavRequested,
+            this, &MainWindow::onSstvExportWav);
+    connect(sstvPanel_, &SstvPanel::decodeWavRequested,
+            this, &MainWindow::onSstvDecodeWav);
+    connect(sstvPanel_, &SstvPanel::startMicRequested,
+            this, &MainWindow::onSstvStartMic);
+    connect(sstvPanel_, &SstvPanel::stopMicRequested,
+            this, &MainWindow::onSstvStopMic);
 
     // Audio input callback -> waveform display + radio/rx-mic segmenting
     audioInput_->setCallback([this](const float* samples, int count) {
@@ -280,6 +341,8 @@ void MainWindow::connectSignals()
             accumulateRadio(samples, count);
         } else if (rxMicListening_) {
             accumulateRxMic(samples, count);
+        } else if (sstvMicListening_) {
+            accumulateSstvMic(samples, count);
         }
     });
 }
@@ -696,7 +759,13 @@ bool MainWindow::beginTxPlayback(const std::vector<float>& dataSamples,
         }
     }
 
-    if (txFromRadio_) {
+    if (txFromSstv_) {
+        // SSTV：整帧音频原样播放（不含准备音、不含帧尾静音——那是数据链路的
+        // 约定，加在模拟制式上会被解码端当成图像内容）
+        sstvPanel_->setTxActive(true);
+        sstvPanel_->setTxProgress(0);
+        sstvPanel_->setTxStatus(QStringLiteral("发射中..."));
+    } else if (txFromRadio_) {
         // 电台面板发射：进度/状态回报到电台面板（发送中锁定选项、显示进度条）
         radioPanel_->setSending(true);
         radioPanel_->setSendProgress(withPrepTone ? -1 : 0);
@@ -708,11 +777,15 @@ bool MainWindow::beginTxPlayback(const std::vector<float>& dataSamples,
     }
     // 状态分工：状态栏只播报"阶段事件"（开始/进入数据段），持续的进度与
     // 阶段文字留给任务面板，避免两处显示同一句话。
-    statusBar()->showMessage(withPrepTone
-        ? (QStringLiteral("发射已开始，") +
-           QString::number(static_cast<double>(config_.prepToneSeconds), 'f', 0) +
-           QStringLiteral(" 秒准备音后发送数据"))
-        : QStringLiteral("数据发射已开始"));
+    if (txFromSstv_) {
+        statusBar()->showMessage(QStringLiteral("SSTV 发射已开始"));
+    } else {
+        statusBar()->showMessage(withPrepTone
+            ? (QStringLiteral("发射已开始，") +
+               QString::number(static_cast<double>(config_.prepToneSeconds), 'f', 0) +
+               QStringLiteral(" 秒准备音后发送数据"))
+            : QStringLiteral("数据发射已开始"));
+    }
 
     // Pace the writes: ~20ms ticks, each tick fills whatever the
     // QAudioOutput buffer currently has free. Never dumps all samples at
@@ -753,7 +826,9 @@ void MainWindow::onTxPlaybackTick()
         }
         if (total > 0) {
             const int pct = static_cast<int>(txPlaybackPos_ * 100 / total);
-            if (txFromRadio_) {
+            if (txFromSstv_) {
+                sstvPanel_->setTxProgress(pct);
+            } else if (txFromRadio_) {
                 radioPanel_->setSendProgress(pct);
             } else {
                 txPanel_->onTransmissionStatus(inPrep
@@ -798,6 +873,16 @@ void MainWindow::finishTxPlayback(bool aborted)
 
     if (audioOutput_->isRunning()) {
         audioOutput_->stop();
+    }
+
+    if (txFromSstv_) {
+        sstvPanel_->setTxActive(false);
+        sstvPanel_->setTxProgress(aborted ? 0 : 100);
+        sstvPanel_->setTxStatus(aborted ? QStringLiteral("已停止发射")
+                                        : QStringLiteral("发射完成"));
+        statusBar()->showMessage(aborted ? QStringLiteral("SSTV 发射已停止")
+                                         : QStringLiteral("SSTV 发射完成"), 5000);
+        return;
     }
 
     if (txFromRadio_) {
@@ -1419,5 +1504,363 @@ void MainWindow::stopRxMicListening()
     }
 }
 
+// ================================================================
+// SSTV：图片 -> 音频（发射 / 导出 WAV）、音频 -> 图片（WAV / 麦克风）
+//
+// 三条硬约束：
+//   1) SSTV 是**模拟制式**，绝不走 encodeTxInput（那条链路会拼准备音与帧尾
+//      静音，在 SSTV 里会被解码端当成图像内容）。
+//   2) 一帧 Martin M1 有 500 万个样本，编码必须离开 UI 线程。
+//   3) 麦克风录制是"整段直通"：现有 accumulateSegment 的 maxSeg=30s 会把
+//      114 秒的 M1 帧直接截断，所以这里完全不切段、不裁尾。
+// ================================================================
+
+void MainWindow::onSstvTransmit()
+{
+    std::vector<uint8_t> rgb;
+    const sstv::ModeSpec* spec = nullptr;
+    QString err;
+    if (!sstvPanel_->takeFrame(rgb, spec, err)) {
+        sstvPanel_->setTxStatus(err);
+        QMessageBox::warning(this, QStringLiteral("提示"), err);
+        return;
+    }
+
+    sstvPanel_->setTxActive(true);
+    sstvPanel_->setTxProgress(-1);          // 忙碌
+    sstvPanel_->setTxStatus(QStringLiteral("编码中..."));
+
+    const int gen = ++txEncodeGen_;
+    const int sr = config_.sampleRate;
+    auto rgbPtr = std::make_shared<std::vector<uint8_t> >(std::move(rgb));
+    const sstv::ModeSpec* specCopy = spec;
+
+    auto job = std::unique_ptr<TxEncodeJob>(new TxEncodeJob());
+    TxEncodeJob* raw = job.get();
+    txEncodeJobs_.push_back(std::move(job));
+
+    raw->worker = std::thread([this, rgbPtr, specCopy, sr, gen, raw]() {
+        std::vector<float> samples =
+            sstv::encodeImage(rgbPtr->data(), *specCopy, sr, 0.8f);
+
+        QMetaObject::invokeMethod(this, [this, samples, gen]() mutable {
+            if (gen != txEncodeGen_.load()) {
+                return;   // 已被停止/取消，丢弃过期结果
+            }
+            if (samples.empty()) {
+                sstvPanel_->setTxActive(false);
+                sstvPanel_->setTxStatus(QStringLiteral("编码失败：音频样本为空"));
+                return;
+            }
+            txFromSstv_ = true;
+            txFromRadio_ = false;
+            if (!beginTxPlayback(samples, false)) {
+                txFromSstv_ = false;
+                sstvPanel_->setTxActive(false);
+                sstvPanel_->setTxStatus(QStringLiteral("无法启动音频输出"));
+            }
+        }, Qt::QueuedConnection);
+
+        raw->finished = true;
+    });
+}
+
+void MainWindow::onSstvStopTransmit()
+{
+    if (txOnAir_) {
+        // 已经在播放：立刻停止（SSTV 是模拟信号，不存在"发停止通知"这回事）
+        finishTxPlayback(true);
+        return;
+    }
+    // 还在编码：只取消编码，一个样本都没发出去
+    cancelPendingEncode();
+    sstvPanel_->setTxActive(false);
+    sstvPanel_->setTxProgress(0);
+    sstvPanel_->setTxStatus(QStringLiteral("已取消编码"));
+    statusBar()->showMessage(QStringLiteral("SSTV 发射已取消"), 5000);
+}
+
+void MainWindow::onSstvExportWav()
+{
+    std::vector<uint8_t> rgb;
+    const sstv::ModeSpec* spec = nullptr;
+    QString err;
+    if (!sstvPanel_->takeFrame(rgb, spec, err)) {
+        sstvPanel_->setTxStatus(err);
+        QMessageBox::warning(this, QStringLiteral("提示"), err);
+        return;
+    }
+
+    // 导出与发射是两个独立动作：这里只生成文件，不播放
+    QString suggested = QDir::homePath() + QStringLiteral("/SSTV_") +
+                        QString::fromUtf8(spec->name).replace(QLatin1Char(' '), QLatin1Char('_')) +
+                        QStringLiteral(".wav");
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出 SSTV WAV"), suggested,
+        QStringLiteral("WAV 文件 (*.wav)"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    sstvPanel_->setTxProgress(-1);
+    sstvPanel_->setTxStatus(QStringLiteral("正在导出 WAV..."));
+
+    const int gen = ++txEncodeGen_;
+    const int sr = config_.sampleRate;
+    auto rgbPtr = std::make_shared<std::vector<uint8_t> >(std::move(rgb));
+    const sstv::ModeSpec* specCopy = spec;
+
+    auto job = std::unique_ptr<TxEncodeJob>(new TxEncodeJob());
+    TxEncodeJob* raw = job.get();
+    txEncodeJobs_.push_back(std::move(job));
+
+    raw->worker = std::thread([this, rgbPtr, specCopy, sr, gen, path, raw]() {
+        std::vector<float> samples =
+            sstv::encodeImage(rgbPtr->data(), *specCopy, sr, 0.8f);
+        bool ok = false;
+        if (!samples.empty()) {
+            AudioFormat fmt;
+            fmt.sampleRate = sr;
+            fmt.channels = 1;
+            fmt.bitsPerSample = 16;
+            WavWriter writer;
+            if (writer.open(path.toStdString(), fmt)) {
+                writer.write(samples);
+                writer.close();
+                ok = true;
+            }
+        }
+        QMetaObject::invokeMethod(this, [this, ok, path, gen]() {
+            if (gen != txEncodeGen_.load()) {
+                return;
+            }
+            sstvPanel_->setTxProgress(ok ? 100 : 0);
+            sstvPanel_->setTxStatus(ok
+                ? QStringLiteral("已导出: %1").arg(path)
+                : QStringLiteral("导出失败: %1").arg(path));
+            statusBar()->showMessage(ok ? QStringLiteral("SSTV WAV 已导出")
+                                        : QStringLiteral("SSTV WAV 导出失败"), 5000);
+        }, Qt::QueuedConnection);
+        raw->finished = true;
+    });
+}
+
+void MainWindow::onSstvDecodeWav(const QString& path)
+{
+    startSstvDecodeFromFile(path);
+}
+
+void MainWindow::onSstvStartMic()
+{
+    if (sstvMicListening_) {
+        return;
+    }
+    // 共享输入设备：三者互斥，先停掉其它监听
+    if (radioListening_) {
+        onRadioStopListening();
+    }
+    if (rxMicListening_) {
+        stopRxMicListening();
+    }
+
+    sstvMicBuf_.clear();
+    sstvMicQuiet_ = 0;
+    sstvMicSignalSeen_ = false;
+    sstvMicSampleRate_ = config_.sampleRate;
+
+    if (!audioInput_->start(sstvMicSampleRate_, 1, 8192)) {
+        sstvPanel_->setRxStatus(QStringLiteral("无法启动音频输入设备"));
+        return;
+    }
+
+    sstvMicListening_ = true;
+    sstvPanel_->setRxActive(true);
+    sstvPanel_->setRxProgress(-1);
+    sstvPanel_->setRxStatus(QStringLiteral("正在录制…请播放完整的 SSTV 信号"));
+    if (settingsDialog_) {
+        settingsDialog_->setInputDeviceBusy(QStringLiteral("SSTV"));
+    }
+    sstvMicTimer_->start();
+    statusBar()->showMessage(QStringLiteral("SSTV 录制已开始"));
+}
+
+void MainWindow::accumulateSstvMic(const float* samples, int count)
+{
+    if (!sstvMicListening_ || count <= 0) {
+        return;
+    }
+    // 整段直通：全量累积，不切段、不裁尾
+    const size_t maxSamples = static_cast<size_t>(sstvMicSampleRate_) * 120u;
+    if (sstvMicBuf_.size() < maxSamples) {
+        const size_t room = maxSamples - sstvMicBuf_.size();
+        const size_t n = std::min<size_t>(static_cast<size_t>(count), room);
+        sstvMicBuf_.insert(sstvMicBuf_.end(), samples, samples + n);
+    }
+
+    // 只用能量判断"信号是否已经结束"（尾部静音够了就收尾）
+    double sum = 0.0;
+    for (int i = 0; i < count; ++i) {
+        sum += static_cast<double>(samples[i]) * static_cast<double>(samples[i]);
+    }
+    const double rms = std::sqrt(sum / static_cast<double>(count));
+    if (rms > 0.002) {
+        sstvMicSignalSeen_ = true;
+        sstvMicQuiet_ = 0;
+    } else {
+        sstvMicQuiet_ += static_cast<size_t>(count);
+    }
+}
+
+void MainWindow::onSstvMicTick()
+{
+    if (!sstvMicListening_ || sstvMicSampleRate_ <= 0) {
+        return;
+    }
+    const double totalSec = static_cast<double>(sstvMicBuf_.size()) /
+                            static_cast<double>(sstvMicSampleRate_);
+    const double quietSec = static_cast<double>(sstvMicQuiet_) /
+                            static_cast<double>(sstvMicSampleRate_);
+
+    // 收尾条件：见到过信号且尾部静音 >= 1.0s（且已录 >= 5s），或达到上限
+    const bool tailQuiet = sstvMicSignalSeen_ && quietSec >= 1.0 && totalSec >= 5.0;
+    const bool overflow = totalSec >= 118.0;
+
+    if (tailQuiet || overflow) {
+        stopSstvMicListening();
+        return;
+    }
+    sstvPanel_->setRxStatus(QStringLiteral("正在录制… %1 秒")
+        .arg(totalSec, 0, 'f', 1));
+}
+
+void MainWindow::onSstvStopMic()
+{
+    stopSstvMicListening();
+}
+
+void MainWindow::stopSstvMicListening()
+{
+    if (!sstvMicListening_) {
+        return;
+    }
+    sstvMicListening_ = false;
+    sstvMicTimer_->stop();
+    if (audioInput_->isRunning()) {
+        audioInput_->stop();
+    }
+    if (settingsDialog_) {
+        settingsDialog_->setInputDeviceBusy(QString());
+    }
+
+    std::vector<float> samples = std::move(sstvMicBuf_);
+    sstvMicBuf_.clear();
+    sstvMicQuiet_ = 0;
+    const int sr = sstvMicSampleRate_;
+
+    sstvPanel_->setRxActive(false);
+    sstvPanel_->setRxProgress(0);
+
+    if (samples.size() < static_cast<size_t>(sr) * 2u) {
+        sstvPanel_->setRxStatus(QStringLiteral("录制的音频太短，无法解码"));
+        return;
+    }
+    sstvPanel_->setRxActive(true);
+    sstvPanel_->setRxStatus(QStringLiteral("解码中..."));
+    startSstvDecodeFromBuffer(std::move(samples), sr);
+}
+
+void MainWindow::startSstvDecodeFromFile(const QString& path)
+{
+    audiot::WavReader reader;
+    if (!reader.open(path.toStdString())) {
+        sstvPanel_->setRxStatus(QStringLiteral("无法打开 WAV 文件: %1").arg(path));
+        return;
+    }
+    const int sr = reader.format().sampleRate;
+    std::vector<float> samples = reader.readAll();
+    reader.close();
+
+    sstvPanel_->setRxActive(true);
+    sstvPanel_->setRxProgress(0);
+    sstvPanel_->setRxStatus(QStringLiteral("解码中..."));
+    startSstvDecodeFromBuffer(std::move(samples), sr);
+}
+
+void MainWindow::startSstvDecodeFromBuffer(std::vector<float> samples, int sampleRate)
+{
+    // 上一次解码还没结束时，先等它收尾（面板按钮此时是禁用的，
+    // 正常流程不会走到这里；保险起见仍然只做一次短暂的 join）
+    if (sstvDecodeThread_) {
+        sstvDecodeAborted_ = true;
+        if (sstvDecodeThread_->joinable()) {
+            sstvDecodeThread_->join();
+        }
+        delete sstvDecodeThread_;
+        sstvDecodeThread_ = nullptr;
+    }
+
+    sstvDecodeAborted_ = false;
+    sstvDecodeRunning_ = true;
+    const int gen = ++sstvDecodeGen_;
+    const sstv::ModeSpec* forceMode = sstvPanel_->forcedMode();
+
+    sstvDecodeThread_ = new std::thread(
+        [this, samples = std::move(samples), sampleRate, forceMode, gen]() mutable {
+            const std::function<void(int)> progress =
+                [this, gen](int pct) {
+                    QMetaObject::invokeMethod(this, [this, pct, gen]() {
+                        if (gen == sstvDecodeGen_.load()) {
+                            sstvPanel_->setRxProgress(pct);
+                        }
+                    }, Qt::QueuedConnection);
+                };
+            const sstv::DecodeResult r =
+                sstv::decode(samples, sampleRate, forceMode, progress);
+
+            if (gen != sstvDecodeGen_.load() || sstvDecodeAborted_.load()) {
+                sstvDecodeRunning_ = false;
+                return;
+            }
+
+            QImage image;
+            if (r.ok && !r.rgb.empty()) {
+                QImage raw(r.rgb.data(), r.width, r.height, r.width * 3,
+                           QImage::Format_RGB888);
+                image = raw.copy();   // 必须深拷贝：r 马上离开作用域
+            }
+
+            QString status;
+            if (!r.ok) {
+                status = QString::fromStdString(r.error);
+            } else if (!r.warning.empty()) {
+                // 成功但有疑点时把提示一并显示，不让用户误以为结果可靠
+                status = QStringLiteral("%1（置信度 %2%）")
+                    .arg(QString::fromStdString(r.warning))
+                    .arg(static_cast<int>(r.confidence * 100.0f));
+            } else {
+                status = QStringLiteral("解码完成");
+            }
+
+            QMetaObject::invokeMethod(this, [this, image, status]() {
+                presentSstvResult(image, status);
+            }, Qt::QueuedConnection);
+
+            sstvDecodeRunning_ = false;
+        });
+}
+
+void MainWindow::presentSstvResult(const QImage& image, const QString& status)
+{
+    sstvPanel_->setRxActive(false);
+    sstvPanel_->setRxProgress(image.isNull() ? 0 : 100);
+
+    if (image.isNull()) {
+        sstvPanel_->setRxStatus(status);
+        statusBar()->showMessage(status, 8000);
+        return;
+    }
+    sstvPanel_->showDecodedImage(image, status);
+    statusBar()->showMessage(QStringLiteral("SSTV 解码完成"), 5000);
+}
 
 } // namespace audiot

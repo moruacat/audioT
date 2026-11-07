@@ -6,6 +6,7 @@
 #include <QTabWidget>
 #include <QAction>
 #include <QTimer>
+#include <QImage>
 
 #include <memory>
 #include <vector>
@@ -22,6 +23,7 @@ namespace audiot {
 class TxPanel;
 class RxPanel;
 class RadioPanel;
+class SstvPanel;
 class AudioMonitor;
 class SettingsDialog;
 class ModemSettingsWidget;
@@ -48,6 +50,15 @@ private slots:
     void onRadioStopListening();
     void onRadioSend(const QString& textOrFile);
     void onRadioStopSend();   // 发送中点击"停止"（面板内已二次确认）
+
+    // SSTV：图片 -> 音频（发射/导出 WAV）、音频 -> 图片（WAV/麦克风）
+    void onSstvTransmit();
+    void onSstvStopTransmit();
+    void onSstvExportWav();
+    void onSstvDecodeWav(const QString& path);
+    void onSstvStartMic();
+    void onSstvStopMic();
+    void onSstvMicTick();      // 检查尾部静音 / 最长时长，决定是否收尾
 
 private:
     void setupUI();
@@ -83,6 +94,17 @@ private:
     void presentRxMicResult(const DecodeResult& result);
     // 停止麦克风监听并回收段解码线程（幂等）
     void stopRxMicListening();
+
+    // ---- SSTV ----
+    // 麦克风整段录制（回调线程）：不切段、不裁尾，只跟踪尾部静音
+    void accumulateSstvMic(const float* samples, int count);
+    // 收尾：把整段交给后台解码（幂等）。音频回调线程内绝不 join
+    void stopSstvMicListening();
+    // 在后台线程解码给定的音频（WAV 文件路径 或 已累积的整段样本）
+    void startSstvDecodeFromFile(const QString& path);
+    void startSstvDecodeFromBuffer(std::vector<float> samples, int sampleRate);
+    // 把解码结果画到面板上（UI 线程）
+    void presentSstvResult(const QImage& image, const QString& status);
 
     // Real-time TX playback orchestration (prep tone + modulated data)
     bool beginTxPlayback(const std::vector<float>& dataSamples,
@@ -122,6 +144,7 @@ private:
     TxPanel* txPanel_;
     RxPanel* rxPanel_;
     RadioPanel* radioPanel_;
+    SstvPanel* sstvPanel_;
     AudioMonitor* audioMonitor_;
     QTabWidget* tabWidget_;
 
@@ -146,6 +169,9 @@ private:
     bool txDataPhaseAnnounced_;             // 数据阶段是否已向状态栏播报过一次
     // 本次发射来自电台面板还是发射面板：决定进度/状态回报到哪个面板
     bool txFromRadio_;
+    // 本次发射来自 SSTV 面板（SSTV 是模拟制式：不拼准备音、不拼帧尾静音，
+    // 也不走调制/ FEC 链路，必须单独分派）
+    bool txFromSstv_;
     // 本次发射就是"[发送已停止]"通知本身：此时再点"停止发送"不重复通知
     bool txStopNotice_;
     // 本次发送是否已经真正上air（进入播放阶段）。编码阶段被取消时不向
@@ -182,6 +208,18 @@ private:
     // 发射后台编码（大文件调制耗时，必须离开 UI 线程）
     std::vector<std::unique_ptr<TxEncodeJob>> txEncodeJobs_;
     std::atomic<int> txEncodeGen_;   // 代号：不匹配的在途编码结果一律丢弃
+
+    // SSTV 麦克风整段录制（与电台/接收麦克风互斥，共享输入设备）
+    bool sstvMicListening_;
+    std::vector<float> sstvMicBuf_;     // 整段样本（不做切段/裁尾）
+    size_t sstvMicQuiet_;               // 尾部连续静音样本数
+    bool sstvMicSignalSeen_;            // 是否已经见到过信号
+    int sstvMicSampleRate_;
+    QTimer* sstvMicTimer_;              // 500ms 检查一次是否该收尾
+    std::thread* sstvDecodeThread_;     // WAV/整段的后台解码线程
+    std::atomic<bool> sstvDecodeAborted_;
+    std::atomic<int> sstvDecodeGen_;    // 代号：丢弃过期解码结果
+    std::atomic<bool> sstvDecodeRunning_;
 };
 
 } // namespace audiot
